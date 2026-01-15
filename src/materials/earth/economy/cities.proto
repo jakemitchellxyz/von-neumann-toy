@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package earth.economy;
+
+// City data entry for vector database
+message City {
+    // City name
+    string name = 1;
+    
+    // Country name
+    string country = 2;
+    
+    // Latitude in radians
+    double latitude = 3;
+    
+    // Longitude in radians
+    double longitude = 4;
+    
+    // Population count (0 if not available)
+    float population = 5;
+    
+    // Population density (people per km², 0 if not available)
+    float density = 6;
+    
+    // 3D position on Earth sphere (normalized)
+    // x, y, z components
+    float position_x = 7;
+    float position_y = 8;
+    float position_z = 9;
+}
+
+// Database containing all cities
+message CityDatabase {
+    // List of all cities
+    repeated City cities = 1;
+    
+    // Version/metadata
+    uint32 version = 2;
+    string source_file = 3;
+}

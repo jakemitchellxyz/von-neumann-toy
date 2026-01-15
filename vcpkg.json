@@ -1,0 +1,15 @@
+{
+  "dependencies": [
+    "glfw3",
+    "glm",
+    "supernovas",
+    "cspice",
+    "starlink-ast",
+    "json5-parser",
+    "openxlsx",
+    "stb",
+    "tiff",
+    "gdal",
+    "protobuf"
+  ]
+}

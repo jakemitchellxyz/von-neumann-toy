@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "vcpkg",
+      "displayName": "vcpkg",
+      "description": "Sets the vcpkg toolchain file for CMake.",
+      "toolchainFile": "X:/Code/vcpkg/scripts/buildsystems/vcpkg.cmake"
+    }
+  ]
+}

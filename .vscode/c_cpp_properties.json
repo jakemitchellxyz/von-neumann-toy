@@ -1,0 +1,33 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/build/vcpkg_installed/x64-windows/include",
+                "${workspaceFolder}/build/vcpkg_installed/x64-windows/include/GLFW",
+                "${workspaceFolder}/build/vcpkg_installed/x64-windows/include/glm",
+                "${workspaceFolder}/build/vcpkg_installed/x64-windows/include/cspice",
+                "${workspaceFolder}/build/vcpkg_installed/x64-windows/include/OpenXLSX",
+                "${workspaceFolder}/build/vcpkg_installed/x64-windows/include/json5_parser",
+                "${workspaceFolder}/build/_deps/cspice/cspice/include"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE",
+                "HAS_CSPICE",
+                "HAS_JSON5_PARSER"
+            ],
+            "windowsSdkVersion": "10.0.26100.0",
+            "compilerPath": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.40.33807/bin/Hostx64/x64/cl.exe",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-msvc-x64",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "configurationProvider": "ms-vscode.cmake-tools"
+        }
+    ],
+    "version": 4
+}

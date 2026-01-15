@@ -1,0 +1,8 @@
+formatVersion: 1
+formatType: am-configuration
+---
+applications:
+  builtinAppsManifestDir: "${EXECUTABLE_DIR}"
+
+ui:
+  mainQml: "${CONFIG_DIR}/windows/launcher.qml"

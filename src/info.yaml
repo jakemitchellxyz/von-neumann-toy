@@ -1,0 +1,21 @@
+formatVersion: 1
+formatType: am-package
+---
+id: "von-neumann-toy"
+name:
+  en: "Von Neumann Toy"
+
+version: "1.0.0"
+
+applications:
+  - id: "von-neumann-toy.controls"
+    code: "controls.qml"
+    runtime: qml
+
+  - id: "von-neumann-toy.data"
+    code: "data.qml"
+    runtime: qml
+
+  # - id: "von-neumann-toy.game"
+  #   code: "game.qml"
+  #   runtime: qml

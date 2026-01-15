@@ -1,0 +1,8 @@
+.env
+vcpkg_installed/
+build/
+.cache/
+defaults/
+earth-textures/
+star-textures/
+settings.json5
