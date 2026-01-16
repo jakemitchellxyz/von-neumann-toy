@@ -4,5 +4,5 @@ build/
 .cache/
 defaults/
 earth-textures/
-star-textures/
+celestial-skybox/
 settings.json5

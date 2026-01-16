@@ -33,10 +33,6 @@
 #include <gdal_priv.h>
 #include <gdal_utils.h>
 
-// OpenXLSX for loading atmosphere data from xlsx
-#ifdef HAS_OPENXLSX
-#include <OpenXLSX.hpp>
-#endif
 
 
 // Global instance
@@ -48,9 +44,6 @@ EarthMaterial g_earthMaterial;
 // Source tile dimensions
 static constexpr int SOURCE_TILE_SIZE = 21600;
 
-// Maximum altitude for atmosphere density lookup (meters)
-// Earth's atmosphere extends to exosphere (~10,000km) for proper light refraction
-static constexpr float MAX_ATMOSPHERE_ALTITUDE_METERS = 10000000.0F; // 10,000km
 
 // ============================================================================
 // Constructor / Destructor
@@ -60,29 +53,27 @@ EarthMaterial::EarthMaterial()
     : initialized_(false), fallbackTexture_(0), heightmapTexture_(0), normalMapTexture_(0), elevationLoaded_(false),
       specularTexture_(0), specularLoaded_(false), iceMaskTextures_{}, iceMasksLoaded_{}, landmassMaskTexture_(0),
       landmassMaskLoaded_(false), bathymetryDepthTexture_(0), bathymetryNormalTexture_(0), bathymetryLoaded_(false),
-      combinedNormalTexture_(0), combinedNormalLoaded_(false), nightlightsTexture_(0), nightlightsLoaded_(false),
+      combinedNormalTexture_(0), combinedNormalLoaded_(false),
+      nightlightsTexture_(0), nightlightsLoaded_(false),
+      windTextures_{}, windTexturesLoaded_{},
       shaderProgram_(0), shaderAvailable_(false), uniformModelMatrix_(-1), uniformViewMatrix_(-1),
       uniformProjectionMatrix_(-1), uniformColorTexture_(-1), uniformColorTexture2_(-1), uniformBlendFactor_(-1),
       uniformNormalMap_(-1), uniformHeightmap_(-1), uniformLightDir_(-1), uniformLightColor_(-1), uniformMoonDir_(-1),
       uniformMoonColor_(-1), uniformAmbientColor_(-1), uniformPoleDir_(-1), uniformUseNormalMap_(-1),
-      uniformUseHeightmap_(-1), uniformUseSpecular_(-1), uniformNightlights_(-1), uniformTime_(-1),
+      uniformUseHeightmap_(-1), uniformUseDisplacement_(-1), uniformUseSpecular_(-1), uniformNightlights_(-1), uniformTime_(-1),
       uniformMicroNoise_(-1), uniformHourlyNoise_(-1), uniformSpecular_(-1), uniformIceMask_(-1), uniformIceMask2_(-1),
-      uniformIceBlendFactor_(-1), uniformLandmassMask_(-1), uniformCameraPos_(-1), uniformBathymetryDepth_(-1),
-      uniformBathymetryNormal_(-1), uniformCombinedNormal_(-1), uniformWaterTransmittanceLUT_(-1),
-      uniformWaterSingleScatterLUT_(-1), uniformWaterMultiscatterLUT_(-1), uniformUseWaterScatteringLUT_(-1),
-      uniformPlanetRadius_(-1), microNoiseTexture_(0), hourlyNoiseTexture_(0), noiseTexturesGenerated_(false),
-      atmosphereProgram_(0), atmosphereAvailable_(false), atmosphereDensityTexture_(0), atmosphereDataLoaded_(false),
-      atmosphereMaxAltitude_(MAX_ATMOSPHERE_ALTITUDE_METERS), atmosphereTransmittanceLUT_(0),
-      atmosphereTransmittanceLUTLoaded_(false), atmosphereMultiscatterLUT_(0), atmosphereMultiscatterLUTLoaded_(false),
-      uniformAtmoInvViewProj_(-1), uniformAtmoCameraPos_(-1), uniformAtmoSunDir_(-1), uniformAtmoPlanetPos_(-1),
-      uniformAtmoPlanetRadius_(-1), uniformAtmoAtmosphereRadius_(-1), uniformAtmoDensityTex_(-1),
-      uniformAtmoMaxAltitude_(-1), uniformAtmoTransmittanceLUT_(-1), uniformAtmoUseTransmittanceLUT_(-1),
-      uniformAtmoMultiscatterLUT_(-1), uniformAtmoUseMultiscatterLUT_(-1), waterTransmittanceLUT_(0),
-      waterTransmittanceLUTLoaded_(false), waterSingleScatterLUT_(0), waterSingleScatterLUTLoaded_(false),
-      waterMultiscatterLUT_(0), waterMultiscatterLUTLoaded_(false), monthlyTextures_{}, textureLoaded_{}
+      uniformIceBlendFactor_(-1), uniformLandmassMask_(-1), uniformCameraPos_(-1), uniformCameraDir_(-1), uniformCameraFOV_(-1), uniformPrimeMeridianDir_(-1), uniformBathymetryDepth_(-1),
+      uniformBathymetryNormal_(-1), uniformCombinedNormal_(-1),
+      uniformPlanetRadius_(-1), uniformFlatCircleMode_(-1), uniformSphereCenter_(-1), uniformSphereRadius_(-1), uniformBillboardCenter_(-1),
+      uniformDisplacementScale_(-1),
+      uniformWindTexture1_(-1), uniformWindTexture2_(-1), uniformWindBlendFactor_(-1), uniformWindTextureSize_(-1),
+      microNoiseTexture_(0), hourlyNoiseTexture_(0), noiseTexturesGenerated_(false),
+      monthlyTextures_{}, textureLoaded_{}
 {
     monthlyTextures_.fill(0);
     textureLoaded_.fill(false);
+    windTextures_.fill(0);
+    windTexturesLoaded_.fill(false);
 }
 
 EarthMaterial::~EarthMaterial()
@@ -96,13 +87,13 @@ EarthMaterial::~EarthMaterial()
 
 bool EarthMaterial::initializeShaders()
 {
-    // Early return if shaders are already initialized
-    if (shaderAvailable_ && atmosphereAvailable_)
+    // Early return if shader is already initialized
+    if (shaderAvailable_)
     {
         return true;
     }
 
-    // Load GL extensions (required for both surface and atmosphere shaders)
+    // Load GL extensions (required for surface shader)
     if (!loadGLExtensions())
     {
         std::cerr << "ERROR: EarthMaterial::initializeShaders() - OpenGL "
@@ -114,12 +105,6 @@ bool EarthMaterial::initializeShaders()
 
     // Initialize surface shader (earth-vertex.glsl + earth-fragment.glsl)
     if (!shaderAvailable_ && !initializeSurfaceShader())
-    {
-        return false;
-    }
-
-    // Initialize atmosphere shader (atmosphere-vertex.glsl + atmosphere-fragment.glsl)
-    if (!atmosphereAvailable_ && !initializeAtmosphereShader())
     {
         return false;
     }
@@ -168,29 +153,7 @@ void EarthMaterial::cleanup()
         specularLoaded_ = false;
     }
 
-    // Delete atmosphere density LUT texture
-    if (atmosphereDensityTexture_ != 0)
-    {
-        glDeleteTextures(1, &atmosphereDensityTexture_);
-        atmosphereDensityTexture_ = 0;
-        atmosphereDataLoaded_ = false;
-    }
 
-    // Delete atmosphere transmittance LUT texture
-    if (atmosphereTransmittanceLUT_ != 0)
-    {
-        glDeleteTextures(1, &atmosphereTransmittanceLUT_);
-        atmosphereTransmittanceLUT_ = 0;
-        atmosphereTransmittanceLUTLoaded_ = false;
-    }
-
-    // Delete atmosphere multiscatter LUT texture
-    if (atmosphereMultiscatterLUT_ != 0)
-    {
-        glDeleteTextures(1, &atmosphereMultiscatterLUT_);
-        atmosphereMultiscatterLUT_ = 0;
-        atmosphereMultiscatterLUTLoaded_ = false;
-    }
 
     // Delete ice mask textures
     for (int i = 0; i < MONTHS_PER_YEAR; i++)
@@ -238,25 +201,8 @@ void EarthMaterial::cleanup()
         nightlightsLoaded_ = false;
     }
 
-    // Delete water scattering LUT textures
-    if (waterTransmittanceLUT_ != 0)
-    {
-        glDeleteTextures(1, &waterTransmittanceLUT_);
-        waterTransmittanceLUT_ = 0;
-        waterTransmittanceLUTLoaded_ = false;
-    }
-    if (waterSingleScatterLUT_ != 0)
-    {
-        glDeleteTextures(1, &waterSingleScatterLUT_);
-        waterSingleScatterLUT_ = 0;
-        waterSingleScatterLUTLoaded_ = false;
-    }
-    if (waterMultiscatterLUT_ != 0)
-    {
-        glDeleteTextures(1, &waterMultiscatterLUT_);
-        waterMultiscatterLUT_ = 0;
-        waterMultiscatterLUTLoaded_ = false;
-    }
+    // Delete wind textures (already handled in the loop above, but keeping for clarity)
+    // The wind textures are deleted in the loop that deletes all textures
 
     // Cleanup noise textures
     if (microNoiseTexture_ != 0)
@@ -279,13 +225,6 @@ void EarthMaterial::cleanup()
         shaderProgram_ = 0;
     }
     shaderAvailable_ = false;
-
-    if (atmosphereProgram_ != 0 && glDeleteProgram != nullptr)
-    {
-        glDeleteProgram(atmosphereProgram_);
-        atmosphereProgram_ = 0;
-    }
-    atmosphereAvailable_ = false;
 
     elevationLoaded_ = false;
     initialized_ = false;

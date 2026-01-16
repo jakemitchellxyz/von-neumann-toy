@@ -514,7 +514,7 @@ void EarthMaterial::generateNormalMapSinusoidal(const unsigned char *heightmapSi
             float hU = getHeight(x, y - 1);
             float hD = getHeight(x, y + 1);
 
-            // CRITICAL: Account for sinusoidal projection distortion
+            // Account for sinusoidal projection distortion
             // In sinusoidal: x = lon * cos(lat), so dU/dlon = cos(lat)
             // This means 1 pixel in U represents cos(lat) * (2π/width) radians of longitude
             // At equator (cos(lat)=1): U is stretched, so gradient needs to be scaled DOWN
@@ -522,31 +522,16 @@ void EarthMaterial::generateNormalMapSinusoidal(const unsigned char *heightmapSi
             // Scale factor: 1/cos(lat) to account for the stretching
             float uScale = 1.0f / std::max(std::abs(cosLat), 0.1f); // Clamp to avoid infinity at poles
 
-            // CRITICAL: U direction flips once across the width for seamless wrapping
-            // The sinusoidal projection wraps 360 degrees: u=0 and u=1 represent the same longitude (antimeridian)
-            // For seamless wrapping, U direction must flip gradually from one edge to the other
-            // This ensures that when the edges meet, they create a seamless transition instead of an immediate flip
-            // uFlip goes from +1 at u=0 to -1 at u=1 (or vice versa), creating gradual inversion
-            float uFlip = 1.0f - 2.0f * u_sinu; // +1 at u=0, -1 at u=1, 0 at u=0.5
-
-            // CRITICAL: V direction flips based on latitude because we're mapping a globe
-            // At north pole (lat = +90°): V+ points toward pole (north)
-            // At equator (lat = 0°): V+ points north (transitioning)
-            // At south pole (lat = -90°): V+ points toward pole (south)
-            // So V direction needs to flip: in northern hemisphere, V+ = north; in southern, V+ = south
-            // Use latitude sign to determine flip: positive lat = northern hemisphere, negative = southern
-            float vFlip = (lat >= 0.0f) ? 1.0f : -1.0f; // +1 for northern hemisphere, -1 for southern
-
             // Gradient in U and V directions (sinusoidal space)
-            float dU = (hR - hL) * 0.5f * uScale * uFlip; // Scale U gradient and apply flip for seamless wrapping
-            float dV = (hD - hU) * 0.5f * vFlip;          // V is uniform, but flip based on hemisphere
+            // Treat U and V normally: U = east-west, V = north-south (with sides being poles)
+            float dU = (hR - hL) * 0.5f * uScale;
+            float dV = (hD - hU) * 0.5f;
 
             // Construct normal from gradient
             // Normal direction is (-df/dU, -df/dV, 1) in tangent space
-            // In sinusoidal tangent space: +U = east, +V = toward nearest pole (north in NH, south in SH)
-            // When wrapped around sphere, these map to world space east-west and north-south correctly
+            // In sinusoidal tangent space: +U = east, +V = north (sides are poles)
             float nU = -dU; // Negate U for normal direction (east-west)
-            float nV = -dV; // Negate V for normal direction (toward nearest pole)
+            float nV = -dV; // Negate V for normal direction (north-south)
             float nZ = 1.0f;
 
             // Normalize
@@ -564,34 +549,12 @@ void EarthMaterial::generateNormalMapSinusoidal(const unsigned char *heightmapSi
                 nZ = 1.0f;
             }
 
-            // CRITICAL: Apply UV coordinate swapping pattern for robust depth at large FOVs
-            // Swap U and V coordinates every 180 degrees (every 0.5 in normalized UV)
-            // This creates a checkerboard pattern: two full polar swaps on each axis
-            // Determine which quadrant we're in (0-3) based on 180-degree boundaries
-            int uQuadrant = static_cast<int>(std::floor(u_sinu * 2.0f));
-            int vQuadrant = static_cast<int>(std::floor(v * 2.0f));
-
-            // Apply swapping pattern: swap U and V components in alternating quadrants
-            // Pattern: checkerboard where adjacent 180-degree regions swap coordinates
-            bool swapUV = ((uQuadrant + vQuadrant) % 2) == 1;
-
             // Convert from [-1,1] to [0,255]
             // Standard normal map encoding: R=X (U/east), G=Y (V/north), B=Z (up)
-            // CRITICAL: Flip V component (north/south direction) to match shader convention
-            if (swapUV)
-            {
-                // Swap U and V components: store as (nV, nU, nZ)
-                normalMapSinu[dstIdx * 3 + 0] = static_cast<unsigned char>((-nV * 0.5f + 0.5f) * 255.0f); // V in U slot
-                normalMapSinu[dstIdx * 3 + 1] = static_cast<unsigned char>((nU * 0.5f + 0.5f) * 255.0f);  // U in V slot
-                normalMapSinu[dstIdx * 3 + 2] = static_cast<unsigned char>((nZ * 0.5f + 0.5f) * 255.0f);
-            }
-            else
-            {
-                // Normal order: store as (nU, nV, nZ)
-                normalMapSinu[dstIdx * 3 + 0] = static_cast<unsigned char>((nU * 0.5f + 0.5f) * 255.0f);
-                normalMapSinu[dstIdx * 3 + 1] = static_cast<unsigned char>((-nV * 0.5f + 0.5f) * 255.0f); // Flip V
-                normalMapSinu[dstIdx * 3 + 2] = static_cast<unsigned char>((nZ * 0.5f + 0.5f) * 255.0f);
-            }
+            // Flip V component (north/south direction) to match shader convention
+            normalMapSinu[dstIdx * 3 + 0] = static_cast<unsigned char>((nU * 0.5f + 0.5f) * 255.0f);
+            normalMapSinu[dstIdx * 3 + 1] = static_cast<unsigned char>((-nV * 0.5f + 0.5f) * 255.0f); // Flip V
+            normalMapSinu[dstIdx * 3 + 2] = static_cast<unsigned char>((nZ * 0.5f + 0.5f) * 255.0f);
         }
     }
 }

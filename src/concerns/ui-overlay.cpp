@@ -1,5 +1,6 @@
 #include "ui-overlay.h"
 #include "../materials/earth/earth-material.h"
+#include "../materials/earth/economy/economy-renderer.h"
 #include "../materials/earth/helpers/coordinate-conversion.h"
 #include "../types/celestial-body.h"
 #include "camera-controller.h"
@@ -48,6 +49,13 @@ static double g_lastFPSTime = 0.0;
 static int g_frameCount = 0;
 static int g_currentFPS = 0;
 
+// Triangle counting state - manual counting for immediate mode OpenGL
+static int g_currentTriangleCount = 0;
+static int g_frameTriangleCount = 0;
+static bool g_countingTriangles = false;
+static GLenum g_currentPrimitiveType = 0;
+static int g_currentPrimitiveVertexCount = 0;
+
 static double g_lastClickTime = 0.0;
 static CelestialBody *g_lastClickedBody = nullptr;
 static const double DOUBLE_CLICK_THRESHOLD = 0.3;
@@ -66,7 +74,8 @@ static MeasurementMode g_measurementMode = MeasurementMode::None;
 static bool g_measurePopupOpen = false; // Second popup for measurement types
 
 // Measurement result (updated each frame)
-static MeasurementResult g_measurementResult = {false, glm::vec3(0), nullptr, 0.0, 0.0, 0.0f};
+static MeasurementResult g_measurementResult =
+    {false, glm::vec3(0), nullptr, 0.0, 0.0, 0.0f, false, 0.0f, 0.0f, 0.0f, 0, 0, 0};
 
 // Shoot mode state
 static bool g_shootModeActive = false;
@@ -439,6 +448,124 @@ int UpdateFPS()
     }
 
     return g_currentFPS;
+}
+
+// ==================================
+// Triangle Count Functions
+// ==================================
+// Manual triangle counting by hooking into OpenGL calls
+// We use function pointers to intercept glBegin/glEnd/glVertex calls
+
+// Function pointer types for OpenGL functions
+typedef void(APIENTRY *PFNGLBEGINPROC)(GLenum mode);
+typedef void(APIENTRY *PFNGLENDPROC)(void);
+typedef void(APIENTRY *PFNGLVERTEX3FPROC)(GLfloat x, GLfloat y, GLfloat z);
+
+// Original OpenGL function pointers (will be set to actual OpenGL functions)
+static PFNGLBEGINPROC glBegin_real = (PFNGLBEGINPROC)glfwGetProcAddress("glBegin");
+static PFNGLENDPROC glEnd_real = (PFNGLENDPROC)glfwGetProcAddress("glEnd");
+static PFNGLVERTEX3FPROC glVertex3f_real = (PFNGLVERTEX3FPROC)glfwGetProcAddress("glVertex3f");
+
+// Helper function to calculate triangles from primitive type and vertex count
+static int CalculateTriangles(GLenum primitiveType, int vertexCount)
+{
+    switch (primitiveType)
+    {
+    case GL_TRIANGLES:
+        return vertexCount / 3;
+    case GL_TRIANGLE_STRIP:
+    case GL_TRIANGLE_FAN:
+        return vertexCount >= 3 ? vertexCount - 2 : 0;
+    case GL_QUADS:
+        return (vertexCount / 4) * 2;
+    case GL_QUAD_STRIP:
+        return vertexCount >= 4 ? vertexCount - 2 : 0;
+    default:
+        return 0;
+    }
+}
+
+// Wrapper functions that count triangles
+static void glBegin_counting(GLenum mode)
+{
+    if (g_countingTriangles)
+    {
+        g_currentPrimitiveType = mode;
+        g_currentPrimitiveVertexCount = 0;
+    }
+    glBegin(mode);
+}
+
+static void glVertex3f_counting(GLfloat x, GLfloat y, GLfloat z)
+{
+    if (g_countingTriangles)
+    {
+        g_currentPrimitiveVertexCount++;
+    }
+    glVertex3f(x, y, z);
+}
+
+static void glEnd_counting(void)
+{
+    if (g_countingTriangles && g_currentPrimitiveType != 0)
+    {
+        int triangles = CalculateTriangles(g_currentPrimitiveType, g_currentPrimitiveVertexCount);
+        g_frameTriangleCount += triangles;
+        g_currentPrimitiveType = 0;
+        g_currentPrimitiveVertexCount = 0;
+    }
+    glEnd();
+}
+
+void StartTriangleCountQuery()
+{
+    // Reset counter for this frame
+    g_frameTriangleCount = 0;
+    g_countingTriangles = true;
+}
+
+void EndTriangleCountQuery()
+{
+    // Stop counting and store the result
+    g_countingTriangles = false;
+    g_currentTriangleCount = g_frameTriangleCount;
+}
+
+int UpdateTriangleCount()
+{
+    // Return the count from the last completed frame
+    return g_currentTriangleCount;
+}
+
+void CountTriangles(GLenum primitiveType, int vertexCount)
+{
+    if (!g_countingTriangles)
+    {
+        return;
+    }
+
+    int triangles = 0;
+    switch (primitiveType)
+    {
+    case GL_TRIANGLES:
+        triangles = vertexCount / 3;
+        break;
+    case GL_TRIANGLE_STRIP:
+    case GL_TRIANGLE_FAN:
+        triangles = vertexCount >= 3 ? vertexCount - 2 : 0;
+        break;
+    case GL_QUADS:
+        triangles = (vertexCount / 4) * 2;
+        break;
+    case GL_QUAD_STRIP:
+        triangles = vertexCount >= 4 ? vertexCount - 2 : 0;
+        break;
+    default:
+        triangles = 0;
+        break;
+    }
+
+    g_frameTriangleCount += triangles;
 }
 
 // ==================================
@@ -1372,6 +1499,7 @@ static void DrawContextMenu(const ContextMenuParams *contextMenu,
 UIInteraction DrawUserInterface(int screenWidth,
                                 int screenHeight,
                                 int fps,
+                                int triangleCount,
                                 const std::vector<CelestialBody *> &bodies,
                                 const TimeControlParams &timeParams,
                                 double mouseX,
@@ -1399,12 +1527,15 @@ UIInteraction DrawUserInterface(int screenWidth,
         false,   // magneticFieldsToggled
         false,   // gravityGridToggled
         false,   // constellationsToggled
+        false,   // constellationGridToggled
+        false,   // constellationFiguresToggled
+        false,   // constellationBoundsToggled
         false,   // forceVectorsToggled
-        false,   // atmosphereLayersToggled
         false,   // sunSpotToggled
-        false,   // enableAtmosphereToggled
-        false,   // useAtmosphereLUTToggled
-        false,   // useMultiscatterLUTToggled
+        false,   // wireframeToggled
+        false,   // fxaaToggled
+        false,   // vsyncToggled
+        false,   // citiesToggled
         false,   // heightmapToggled
         false,   // normalMapToggled
         false,   // roughnessToggled
@@ -1667,7 +1798,7 @@ UIInteraction DrawUserInterface(int screenWidth,
             float popupButtonHeight = 32.0f;
             float popupPadding = 8.0f;
             float popupTitleHeight = 24.0f;
-            float popupHeight = popupTitleHeight + popupPadding + popupButtonHeight * 2 + popupPadding * 2;
+            float popupHeight = popupTitleHeight + popupPadding + popupButtonHeight * 3 + popupPadding * 3;
             float popupX = interactionsBtnX + interactionsBtnSize / 2.0f - popupWidth / 2.0f;
             float popupY = interactionsBtnY + interactionsBtnSize + 8.0f; // Below the button
 
@@ -1734,6 +1865,53 @@ UIInteraction DrawUserInterface(int screenWidth,
             if (isMeasureHovering && mouseClicked)
             {
                 g_measurePopupOpen = !g_measurePopupOpen;
+            }
+
+            currentPopupY += popupButtonHeight + popupPadding / 2;
+
+            // Color Picker button
+            float colorPickerBtnX = popupX + popupPadding;
+            float colorPickerBtnY = currentPopupY;
+            bool isColorPickerHovering = (mouseX >= colorPickerBtnX && mouseX <= colorPickerBtnX + measureBtnW &&
+                                          mouseY >= colorPickerBtnY && mouseY <= colorPickerBtnY + popupButtonHeight);
+
+            DrawRoundedRect(colorPickerBtnX,
+                            colorPickerBtnY,
+                            measureBtnW,
+                            popupButtonHeight,
+                            4.0f,
+                            isColorPickerHovering ? 0.3f : 0.2f,
+                            isColorPickerHovering ? 0.3f : 0.2f,
+                            isColorPickerHovering ? 0.4f : 0.3f,
+                            0.9f);
+
+            // Eye icon
+            float eyeIconSize = popupButtonHeight * 0.5f;
+            float eyeIconX = colorPickerBtnX + 8.0f;
+            float eyeIconY = colorPickerBtnY + (popupButtonHeight - eyeIconSize) / 2.0f;
+            DrawEyeIcon(eyeIconX, eyeIconY, eyeIconSize, 0.9f, 0.9f, 0.95f);
+
+            // Color Picker label
+            DrawText(colorPickerBtnX + eyeIconSize + 16.0f,
+                     colorPickerBtnY + 8,
+                     "Color Picker",
+                     0.75f,
+                     0.9f,
+                     0.9f,
+                     0.95f);
+
+            // Handle color picker button click - toggle color picker mode
+            if (isColorPickerHovering && mouseClicked)
+            {
+                if (g_measurementMode == MeasurementMode::ColorPicker)
+                {
+                    g_measurementMode = MeasurementMode::None; // Toggle off
+                }
+                else
+                {
+                    g_measurementMode = MeasurementMode::ColorPicker;
+                }
+                g_interactionsPopupOpen = false; // Close interactions popup
             }
 
             currentPopupY += popupButtonHeight + popupPadding / 2;
@@ -1958,7 +2136,7 @@ UIInteraction DrawUserInterface(int screenWidth,
 
         // Section heights
         float fullscreenBtnHeight = 28.0f; // At the very top
-        float fpsHeight = 28.0f;
+        float fpsHeight = 48.0f;           // Increased to accommodate FPS and triangle count (2 lines)
         float accordionHeaderHeight = 22.0f;
         float checkboxHeight = 22.0f;
         float dropdownHeight = 24.0f;
@@ -1969,14 +2147,14 @@ UIInteraction DrawUserInterface(int screenWidth,
         static bool g_settingsAccordionExpanded = false;
         float settingsContentHeight =
             g_settingsAccordionExpanded
-                ? (dropdownHeight + restartWarningHeight + fovSliderHeight + checkboxHeight * 6 + PANEL_PADDING * 5)
-                : 0.0f; // 6 checkboxes: heightmap, normalMap, roughness, enableAtmosphere, transmittanceLUT, multiscatterLUT
+                ? (dropdownHeight + restartWarningHeight + fovSliderHeight + checkboxHeight * 3 + PANEL_PADDING * 5)
+                : 0.0f; // 3 checkboxes: heightmap, normalMap, roughness
         float settingsSectionHeight = accordionHeaderHeight + settingsContentHeight + PANEL_PADDING;
 
         // Visualizations accordion state (closed by default)
         static bool g_controlsAccordionExpanded = false;
-        // 9 checkboxes: orbits, axes, barycenters, lagrange, coord grids, magnetic fields, constellations, force vectors, gravity grid, sun spot (atmosphere moved to Settings)
-        float controlsContentHeight = g_controlsAccordionExpanded ? (checkboxHeight * 9 + PANEL_PADDING * 2) : 0.0f;
+        // 13 checkboxes: orbits, axes, barycenters, lagrange, coord grids, magnetic fields, constellations, celestial grid, constellation figures, constellation bounds, force vectors, gravity grid, sun spot, wireframe (atmosphere moved to Settings)
+        float controlsContentHeight = g_controlsAccordionExpanded ? (checkboxHeight * 13 + PANEL_PADDING * 2) : 0.0f;
         float controlsSectionHeight = accordionHeaderHeight + controlsContentHeight + PANEL_PADDING;
 
         float treeHeight = CalculateTreeHeight(solarSystemTree);
@@ -2051,7 +2229,7 @@ UIInteraction DrawUserInterface(int screenWidth,
         currentY += fullscreenBtnHeight;
 
         // ==================================
-        // FPS Section
+        // FPS and Triangle Count Section
         // ==================================
         DrawRoundedRect(panelX + PANEL_PADDING,
                         currentY,
@@ -2063,6 +2241,26 @@ UIInteraction DrawUserInterface(int screenWidth,
                         0.93f,
                         0.95f);
         DrawText(panelX + PANEL_PADDING + 6, currentY + 6, "FPS: " + std::to_string(fps), 1.0f, 0.1f, 0.45f, 0.2f);
+
+        // Format triangle count with thousand separators for readability
+        std::string triangleStr = std::to_string(triangleCount);
+        if (triangleCount >= 1000)
+        {
+            // Add comma separators (e.g., 1,234,567)
+            std::string formatted;
+            int count = 0;
+            for (int i = static_cast<int>(triangleStr.length()) - 1; i >= 0; i--)
+            {
+                if (count > 0 && count % 3 == 0)
+                {
+                    formatted = "," + formatted;
+                }
+                formatted = triangleStr[i] + formatted;
+                count++;
+            }
+            triangleStr = formatted;
+        }
+        DrawText(panelX + PANEL_PADDING + 6, currentY + 20, "Triangles: " + triangleStr, 1.0f, 0.1f, 0.45f, 0.2f);
         currentY += fpsHeight;
 
         // Separator
@@ -2239,9 +2437,10 @@ UIInteraction DrawUserInterface(int screenWidth,
             // Track background
             DrawRoundedRect(fovSliderX, fovTrackY, fovSliderW, fovTrackH, 2.0f, 0.25f, 0.25f, 0.3f, 0.9f);
 
-            // Calculate thumb position (60-120 degree range)
-            const float MIN_FOV = 60.0f;
+            // Calculate thumb position (5-120 degree range, increments of 5)
+            const float MIN_FOV = 5.0f;
             const float MAX_FOV = 120.0f;
+            const float FOV_INCREMENT = 5.0f;
             float fovNormalized = (timeParams.currentFOV - MIN_FOV) / (MAX_FOV - MIN_FOV);
             fovNormalized = glm::clamp(fovNormalized, 0.0f, 1.0f);
             float fovThumbRadius = 7.0f;
@@ -2267,7 +2466,9 @@ UIInteraction DrawUserInterface(int screenWidth,
                 float newNorm =
                     (static_cast<float>(mouseX) - fovSliderX - fovThumbRadius) / (fovSliderW - fovThumbRadius * 2);
                 newNorm = glm::clamp(newNorm, 0.0f, 1.0f);
-                result.newFOV = MIN_FOV + newNorm * (MAX_FOV - MIN_FOV);
+                float rawFOV = MIN_FOV + newNorm * (MAX_FOV - MIN_FOV);
+                // Snap to increments of 5 and clamp to valid range
+                result.newFOV = glm::clamp(round(rawFOV / FOV_INCREMENT) * FOV_INCREMENT, MIN_FOV, MAX_FOV);
 
                 // Update thumb position for immediate visual feedback
                 fovThumbX = fovSliderX + newNorm * (fovSliderW - fovThumbRadius * 2) + fovThumbRadius;
@@ -2302,6 +2503,165 @@ UIInteraction DrawUserInterface(int screenWidth,
             float cbX = panelX + PANEL_PADDING + 8;
             float cbSize = 14.0f;
             float cbItemW = panelWidth - PANEL_PADDING * 2 - 8;
+
+            // Wireframe Mode Checkbox
+            float wireframeY = currentY;
+            float wireframeBoxY = wireframeY + (checkboxHeight - cbSize) / 2;
+            bool isWireframeHovering = (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= wireframeY &&
+                                        mouseY <= wireframeY + checkboxHeight);
+
+            // Checkbox box
+            glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
+            glBegin(GL_QUADS);
+            glVertex2f(cbX, wireframeBoxY);
+            glVertex2f(cbX + cbSize, wireframeBoxY);
+            glVertex2f(cbX + cbSize, wireframeBoxY + cbSize);
+            glVertex2f(cbX, wireframeBoxY + cbSize);
+            glEnd();
+            glColor4f(isWireframeHovering ? 0.6f : 0.4f,
+                      isWireframeHovering ? 0.6f : 0.4f,
+                      isWireframeHovering ? 0.65f : 0.45f,
+                      0.9f);
+            glLineWidth(1.5f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(cbX, wireframeBoxY);
+            glVertex2f(cbX + cbSize, wireframeBoxY);
+            glVertex2f(cbX + cbSize, wireframeBoxY + cbSize);
+            glVertex2f(cbX, wireframeBoxY + cbSize);
+            glEnd();
+
+            // Checkmark if enabled
+            if (timeParams.showWireframe)
+            {
+                glColor3f(0.3f, 0.9f, 0.4f);
+                glLineWidth(2.0f);
+                glBegin(GL_LINES);
+                glVertex2f(cbX + 3, wireframeBoxY + cbSize * 0.5f);
+                glVertex2f(cbX + cbSize * 0.4f, wireframeBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize * 0.4f, wireframeBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize - 2, wireframeBoxY + 2);
+                glEnd();
+                glLineWidth(1.0f);
+            }
+
+            DrawText(cbX + cbSize + 6,
+                     wireframeY + 4,
+                     "Wireframe",
+                     0.75f,
+                     isWireframeHovering ? 0.95f : 0.8f,
+                     isWireframeHovering ? 0.95f : 0.8f,
+                     isWireframeHovering ? 0.95f : 0.8f);
+
+            if (isWireframeHovering && mouseClicked)
+            {
+                result.wireframeToggled = true;
+            }
+            currentY += checkboxHeight;
+
+            // FXAA Antialiasing Checkbox
+            float fxaaY = currentY;
+            float fxaaBoxY = fxaaY + (checkboxHeight - cbSize) / 2;
+            bool isFXAAHovering =
+                (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= fxaaY && mouseY <= fxaaY + checkboxHeight);
+
+            // Checkbox box
+            glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
+            glBegin(GL_QUADS);
+            glVertex2f(cbX, fxaaBoxY);
+            glVertex2f(cbX + cbSize, fxaaBoxY);
+            glVertex2f(cbX + cbSize, fxaaBoxY + cbSize);
+            glVertex2f(cbX, fxaaBoxY + cbSize);
+            glEnd();
+            glColor4f(isFXAAHovering ? 0.6f : 0.4f, isFXAAHovering ? 0.6f : 0.4f, isFXAAHovering ? 0.65f : 0.45f, 0.9f);
+            glLineWidth(1.5f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(cbX, fxaaBoxY);
+            glVertex2f(cbX + cbSize, fxaaBoxY);
+            glVertex2f(cbX + cbSize, fxaaBoxY + cbSize);
+            glVertex2f(cbX, fxaaBoxY + cbSize);
+            glEnd();
+
+            // Checkmark if enabled
+            if (timeParams.fxaaEnabled)
+            {
+                glColor3f(0.3f, 0.9f, 0.4f);
+                glLineWidth(2.0f);
+                glBegin(GL_LINES);
+                glVertex2f(cbX + 3, fxaaBoxY + cbSize * 0.5f);
+                glVertex2f(cbX + cbSize * 0.4f, fxaaBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize * 0.4f, fxaaBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize - 2, fxaaBoxY + 2);
+                glEnd();
+                glLineWidth(1.0f);
+            }
+
+            DrawText(cbX + cbSize + 6,
+                     fxaaY + 4,
+                     "FXAA Antialiasing",
+                     0.75f,
+                     isFXAAHovering ? 0.95f : 0.8f,
+                     isFXAAHovering ? 0.95f : 0.8f,
+                     isFXAAHovering ? 0.95f : 0.8f);
+
+            if (isFXAAHovering && mouseClicked)
+            {
+                result.fxaaToggled = true;
+            }
+            currentY += checkboxHeight;
+
+            // VSync Checkbox
+            float vsyncY = currentY;
+            float vsyncBoxY = vsyncY + (checkboxHeight - cbSize) / 2;
+            bool isVSyncHovering =
+                (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= vsyncY && mouseY <= vsyncY + checkboxHeight);
+
+            // Checkbox box
+            glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
+            glBegin(GL_QUADS);
+            glVertex2f(cbX, vsyncBoxY);
+            glVertex2f(cbX + cbSize, vsyncBoxY);
+            glVertex2f(cbX + cbSize, vsyncBoxY + cbSize);
+            glVertex2f(cbX, vsyncBoxY + cbSize);
+            glEnd();
+            glColor4f(isVSyncHovering ? 0.6f : 0.4f,
+                      isVSyncHovering ? 0.6f : 0.4f,
+                      isVSyncHovering ? 0.65f : 0.45f,
+                      0.9f);
+            glLineWidth(1.5f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(cbX, vsyncBoxY);
+            glVertex2f(cbX + cbSize, vsyncBoxY);
+            glVertex2f(cbX + cbSize, vsyncBoxY + cbSize);
+            glVertex2f(cbX, vsyncBoxY + cbSize);
+            glEnd();
+
+            // Checkmark if enabled
+            if (timeParams.vsyncEnabled)
+            {
+                glColor3f(0.3f, 0.9f, 0.4f);
+                glLineWidth(2.0f);
+                glBegin(GL_LINES);
+                glVertex2f(cbX + 3, vsyncBoxY + cbSize * 0.5f);
+                glVertex2f(cbX + cbSize * 0.4f, vsyncBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize * 0.4f, vsyncBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize - 2, vsyncBoxY + 2);
+                glEnd();
+                glLineWidth(1.0f);
+            }
+
+            DrawText(cbX + cbSize + 6,
+                     vsyncY + 4,
+                     "VSync (Uncap FPS)",
+                     0.75f,
+                     isVSyncHovering ? 0.95f : 0.8f,
+                     isVSyncHovering ? 0.95f : 0.8f,
+                     isVSyncHovering ? 0.95f : 0.8f);
+
+            if (isVSyncHovering && mouseClicked)
+            {
+                result.vsyncToggled = true;
+            }
+            currentY += checkboxHeight;
 
             // Heightmap toggle
             float heightmapY = currentY;
@@ -2447,154 +2807,6 @@ UIInteraction DrawUserInterface(int screenWidth,
                 result.roughnessToggled = true;
             }
             currentY += checkboxHeight;
-
-            // Enable Atmosphere toggle
-            float enableAtmoY = currentY;
-            bool isEnableAtmoHovering = (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= enableAtmoY &&
-                                         mouseY <= enableAtmoY + checkboxHeight);
-            float enableAtmoBoxY = enableAtmoY + (checkboxHeight - cbSize) / 2;
-            glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
-            glBegin(GL_QUADS);
-            glVertex2f(cbX, enableAtmoBoxY);
-            glVertex2f(cbX + cbSize, enableAtmoBoxY);
-            glVertex2f(cbX + cbSize, enableAtmoBoxY + cbSize);
-            glVertex2f(cbX, enableAtmoBoxY + cbSize);
-            glEnd();
-            glColor4f(isEnableAtmoHovering ? 0.6f : 0.4f,
-                      isEnableAtmoHovering ? 0.6f : 0.4f,
-                      isEnableAtmoHovering ? 0.65f : 0.45f,
-                      0.9f);
-            glLineWidth(1.5f);
-            glBegin(GL_LINE_LOOP);
-            glVertex2f(cbX, enableAtmoBoxY);
-            glVertex2f(cbX + cbSize, enableAtmoBoxY);
-            glVertex2f(cbX + cbSize, enableAtmoBoxY + cbSize);
-            glVertex2f(cbX, enableAtmoBoxY + cbSize);
-            glEnd();
-            if (timeParams.enableAtmosphere)
-            {
-                glColor3f(0.3f, 0.9f, 0.4f);
-                glLineWidth(2.0f);
-                glBegin(GL_LINES);
-                glVertex2f(cbX + 3, enableAtmoBoxY + cbSize * 0.5f);
-                glVertex2f(cbX + cbSize * 0.4f, enableAtmoBoxY + cbSize - 3);
-                glVertex2f(cbX + cbSize * 0.4f, enableAtmoBoxY + cbSize - 3);
-                glVertex2f(cbX + cbSize - 2, enableAtmoBoxY + 2);
-                glEnd();
-                glLineWidth(1.0f);
-            }
-            DrawText(cbX + cbSize + 6,
-                     enableAtmoY + 4,
-                     "Enable Atmosphere",
-                     0.75f,
-                     isEnableAtmoHovering ? 0.95f : 0.8f,
-                     isEnableAtmoHovering ? 0.95f : 0.8f,
-                     isEnableAtmoHovering ? 0.95f : 0.8f);
-            if (isEnableAtmoHovering && mouseClicked)
-            {
-                result.enableAtmosphereToggled = true;
-            }
-            currentY += checkboxHeight;
-
-            // Use Atmosphere LUT toggle (only shown if atmosphere is enabled)
-            if (timeParams.enableAtmosphere)
-            {
-                float useLUTY = currentY;
-                bool isUseLUTHovering = (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= useLUTY &&
-                                         mouseY <= useLUTY + checkboxHeight);
-                float useLUTBoxY = useLUTY + (checkboxHeight - cbSize) / 2;
-                glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
-                glBegin(GL_QUADS);
-                glVertex2f(cbX, useLUTBoxY);
-                glVertex2f(cbX + cbSize, useLUTBoxY);
-                glVertex2f(cbX + cbSize, useLUTBoxY + cbSize);
-                glVertex2f(cbX, useLUTBoxY + cbSize);
-                glEnd();
-                glColor4f(isUseLUTHovering ? 0.6f : 0.4f,
-                          isUseLUTHovering ? 0.6f : 0.4f,
-                          isUseLUTHovering ? 0.65f : 0.45f,
-                          0.9f);
-                glLineWidth(1.5f);
-                glBegin(GL_LINE_LOOP);
-                glVertex2f(cbX, useLUTBoxY);
-                glVertex2f(cbX + cbSize, useLUTBoxY);
-                glVertex2f(cbX + cbSize, useLUTBoxY + cbSize);
-                glVertex2f(cbX, useLUTBoxY + cbSize);
-                glEnd();
-                if (timeParams.useAtmosphereLUT)
-                {
-                    glColor3f(0.3f, 0.9f, 0.4f);
-                    glLineWidth(2.0f);
-                    glBegin(GL_LINES);
-                    glVertex2f(cbX + 3, useLUTBoxY + cbSize * 0.5f);
-                    glVertex2f(cbX + cbSize * 0.4f, useLUTBoxY + cbSize - 3);
-                    glVertex2f(cbX + cbSize * 0.4f, useLUTBoxY + cbSize - 3);
-                    glVertex2f(cbX + cbSize - 2, useLUTBoxY + 2);
-                    glEnd();
-                    glLineWidth(1.0f);
-                }
-                DrawText(cbX + cbSize + 6,
-                         useLUTY + 4,
-                         "Use Transmittance LUT",
-                         0.75f,
-                         isUseLUTHovering ? 0.95f : 0.8f,
-                         isUseLUTHovering ? 0.95f : 0.8f,
-                         isUseLUTHovering ? 0.95f : 0.8f);
-                if (isUseLUTHovering && mouseClicked)
-                {
-                    result.useAtmosphereLUTToggled = true;
-                }
-                currentY += checkboxHeight;
-
-                // Use Multiscatter LUT toggle (only shown if atmosphere is enabled)
-                float useMultiscatterLUTY = currentY;
-                bool isUseMultiscatterLUTHovering =
-                    (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= useMultiscatterLUTY &&
-                     mouseY <= useMultiscatterLUTY + checkboxHeight);
-                float useMultiscatterLUTBoxY = useMultiscatterLUTY + (checkboxHeight - cbSize) / 2;
-                glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
-                glBegin(GL_QUADS);
-                glVertex2f(cbX, useMultiscatterLUTBoxY);
-                glVertex2f(cbX + cbSize, useMultiscatterLUTBoxY);
-                glVertex2f(cbX + cbSize, useMultiscatterLUTBoxY + cbSize);
-                glVertex2f(cbX, useMultiscatterLUTBoxY + cbSize);
-                glEnd();
-                glColor4f(isUseMultiscatterLUTHovering ? 0.6f : 0.4f,
-                          isUseMultiscatterLUTHovering ? 0.6f : 0.4f,
-                          isUseMultiscatterLUTHovering ? 0.65f : 0.45f,
-                          0.9f);
-                glLineWidth(1.5f);
-                glBegin(GL_LINE_LOOP);
-                glVertex2f(cbX, useMultiscatterLUTBoxY);
-                glVertex2f(cbX + cbSize, useMultiscatterLUTBoxY);
-                glVertex2f(cbX + cbSize, useMultiscatterLUTBoxY + cbSize);
-                glVertex2f(cbX, useMultiscatterLUTBoxY + cbSize);
-                glEnd();
-                if (timeParams.useMultiscatterLUT)
-                {
-                    glColor3f(0.3f, 0.9f, 0.4f);
-                    glLineWidth(2.0f);
-                    glBegin(GL_LINES);
-                    glVertex2f(cbX + 3, useMultiscatterLUTBoxY + cbSize * 0.5f);
-                    glVertex2f(cbX + cbSize * 0.4f, useMultiscatterLUTBoxY + cbSize - 3);
-                    glVertex2f(cbX + cbSize * 0.4f, useMultiscatterLUTBoxY + cbSize - 3);
-                    glVertex2f(cbX + cbSize - 2, useMultiscatterLUTBoxY + 2);
-                    glEnd();
-                    glLineWidth(1.0f);
-                }
-                DrawText(cbX + cbSize + 6,
-                         useMultiscatterLUTY + 4,
-                         "Use Multiscatter LUT",
-                         0.75f,
-                         isUseMultiscatterLUTHovering ? 0.95f : 0.8f,
-                         isUseMultiscatterLUTHovering ? 0.95f : 0.8f,
-                         isUseMultiscatterLUTHovering ? 0.95f : 0.8f);
-                if (isUseMultiscatterLUTHovering && mouseClicked)
-                {
-                    result.useMultiscatterLUTToggled = true;
-                }
-                currentY += checkboxHeight;
-            }
         }
 
         // ==================================
@@ -3017,6 +3229,149 @@ UIInteraction DrawUserInterface(int screenWidth,
             currentY += checkboxHeight + PANEL_PADDING / 2;
 
             // ==================================
+            // Celestial Grid Checkbox
+            // ==================================
+            float gridY = currentY;
+            float gridBoxY = gridY + (checkboxHeight - cbSize) / 2;
+            bool isGridHovering =
+                (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= gridY && mouseY <= gridY + checkboxHeight);
+
+            // Checkbox box
+            glColor3f(isGridHovering ? 0.5f : 0.4f, isGridHovering ? 0.5f : 0.4f, isGridHovering ? 0.6f : 0.5f);
+            glLineWidth(1.5f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(cbX, gridBoxY);
+            glVertex2f(cbX + cbSize, gridBoxY);
+            glVertex2f(cbX + cbSize, gridBoxY + cbSize);
+            glVertex2f(cbX, gridBoxY + cbSize);
+            glEnd();
+
+            // Checkmark if enabled
+            if (g_showCelestialGrid)
+            {
+                glColor3f(0.3f, 0.9f, 0.4f);
+                glLineWidth(2.0f);
+                glBegin(GL_LINES);
+                glVertex2f(cbX + 3, gridBoxY + cbSize * 0.5f);
+                glVertex2f(cbX + cbSize * 0.4f, gridBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize * 0.4f, gridBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize - 2, gridBoxY + 2);
+                glEnd();
+                glLineWidth(1.0f);
+            }
+
+            DrawText(cbX + cbSize + 6,
+                     gridY + 4,
+                     "Celestial Grid",
+                     0.75f,
+                     isGridHovering ? 0.95f : 0.8f,
+                     isGridHovering ? 0.95f : 0.8f,
+                     isGridHovering ? 0.95f : 0.8f);
+
+            if (isGridHovering && mouseClicked)
+            {
+                result.constellationGridToggled = true;
+            }
+
+            currentY += checkboxHeight + PANEL_PADDING / 2;
+
+            // ==================================
+            // Constellation Figures Checkbox
+            // ==================================
+            float figuresY = currentY;
+            float figuresBoxY = figuresY + (checkboxHeight - cbSize) / 2;
+            bool isFiguresHovering =
+                (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= figuresY && mouseY <= figuresY + checkboxHeight);
+
+            // Checkbox box
+            glColor3f(isFiguresHovering ? 0.5f : 0.4f,
+                      isFiguresHovering ? 0.5f : 0.4f,
+                      isFiguresHovering ? 0.6f : 0.5f);
+            glLineWidth(1.5f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(cbX, figuresBoxY);
+            glVertex2f(cbX + cbSize, figuresBoxY);
+            glVertex2f(cbX + cbSize, figuresBoxY + cbSize);
+            glVertex2f(cbX, figuresBoxY + cbSize);
+            glEnd();
+
+            // Checkmark if enabled
+            if (g_showConstellationFigures)
+            {
+                glColor3f(0.3f, 0.9f, 0.4f);
+                glLineWidth(2.0f);
+                glBegin(GL_LINES);
+                glVertex2f(cbX + 3, figuresBoxY + cbSize * 0.5f);
+                glVertex2f(cbX + cbSize * 0.4f, figuresBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize * 0.4f, figuresBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize - 2, figuresBoxY + 2);
+                glEnd();
+                glLineWidth(1.0f);
+            }
+
+            DrawText(cbX + cbSize + 6,
+                     figuresY + 4,
+                     "Constellation Figures",
+                     0.75f,
+                     isFiguresHovering ? 0.95f : 0.8f,
+                     isFiguresHovering ? 0.95f : 0.8f,
+                     isFiguresHovering ? 0.95f : 0.8f);
+
+            if (isFiguresHovering && mouseClicked)
+            {
+                result.constellationFiguresToggled = true;
+            }
+
+            currentY += checkboxHeight + PANEL_PADDING / 2;
+
+            // ==================================
+            // Constellation Bounds Checkbox
+            // ==================================
+            float boundsY = currentY;
+            float boundsBoxY = boundsY + (checkboxHeight - cbSize) / 2;
+            bool isBoundsHovering =
+                (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= boundsY && mouseY <= boundsY + checkboxHeight);
+
+            // Checkbox box
+            glColor3f(isBoundsHovering ? 0.5f : 0.4f, isBoundsHovering ? 0.5f : 0.4f, isBoundsHovering ? 0.6f : 0.5f);
+            glLineWidth(1.5f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(cbX, boundsBoxY);
+            glVertex2f(cbX + cbSize, boundsBoxY);
+            glVertex2f(cbX + cbSize, boundsBoxY + cbSize);
+            glVertex2f(cbX, boundsBoxY + cbSize);
+            glEnd();
+
+            // Checkmark if enabled
+            if (g_showConstellationBounds)
+            {
+                glColor3f(0.3f, 0.9f, 0.4f);
+                glLineWidth(2.0f);
+                glBegin(GL_LINES);
+                glVertex2f(cbX + 3, boundsBoxY + cbSize * 0.5f);
+                glVertex2f(cbX + cbSize * 0.4f, boundsBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize * 0.4f, boundsBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize - 2, boundsBoxY + 2);
+                glEnd();
+                glLineWidth(1.0f);
+            }
+
+            DrawText(cbX + cbSize + 6,
+                     boundsY + 4,
+                     "Constellation Bounds",
+                     0.75f,
+                     isBoundsHovering ? 0.95f : 0.8f,
+                     isBoundsHovering ? 0.95f : 0.8f,
+                     isBoundsHovering ? 0.95f : 0.8f);
+
+            if (isBoundsHovering && mouseClicked)
+            {
+                result.constellationBoundsToggled = true;
+            }
+
+            currentY += checkboxHeight + PANEL_PADDING / 2;
+
+            // ==================================
             // Force Vectors Checkbox
             // ==================================
             float forceVecY = currentY;
@@ -3065,54 +3420,6 @@ UIInteraction DrawUserInterface(int screenWidth,
 
             currentY += checkboxHeight + PANEL_PADDING / 2;
 
-            // ==================================
-            // Atmosphere Layers Checkbox
-            // ==================================
-            float atmoLayersY = currentY;
-            float atmoLayersBoxY = atmoLayersY + (checkboxHeight - cbSize) / 2;
-            bool isAtmoLayersHovering = (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= atmoLayersY &&
-                                         mouseY <= atmoLayersY + checkboxHeight);
-
-            // Checkbox box
-            glColor3f(isAtmoLayersHovering ? 0.5f : 0.4f,
-                      isAtmoLayersHovering ? 0.5f : 0.4f,
-                      isAtmoLayersHovering ? 0.6f : 0.5f);
-            glLineWidth(1.5f);
-            glBegin(GL_LINE_LOOP);
-            glVertex2f(cbX, atmoLayersBoxY);
-            glVertex2f(cbX + cbSize, atmoLayersBoxY);
-            glVertex2f(cbX + cbSize, atmoLayersBoxY + cbSize);
-            glVertex2f(cbX, atmoLayersBoxY + cbSize);
-            glEnd();
-
-            // Checkmark if enabled
-            if (timeParams.showAtmosphereLayers)
-            {
-                glColor3f(0.3f, 0.9f, 0.4f);
-                glLineWidth(2.0f);
-                glBegin(GL_LINES);
-                glVertex2f(cbX + 3, atmoLayersBoxY + cbSize * 0.5f);
-                glVertex2f(cbX + cbSize * 0.4f, atmoLayersBoxY + cbSize - 3);
-                glVertex2f(cbX + cbSize * 0.4f, atmoLayersBoxY + cbSize - 3);
-                glVertex2f(cbX + cbSize - 2, atmoLayersBoxY + 2);
-                glEnd();
-                glLineWidth(1.0f);
-            }
-
-            DrawText(cbX + cbSize + 6,
-                     atmoLayersY + 4,
-                     "Atmosphere Layers",
-                     0.75f,
-                     isAtmoLayersHovering ? 0.95f : 0.8f,
-                     isAtmoLayersHovering ? 0.95f : 0.8f,
-                     isAtmoLayersHovering ? 0.95f : 0.8f);
-
-            if (isAtmoLayersHovering && mouseClicked)
-            {
-                result.atmosphereLayersToggled = true;
-            }
-
-            currentY += checkboxHeight + PANEL_PADDING / 2;
 
             // ==================================
             // Gravity Grid Checkbox
@@ -3208,6 +3515,65 @@ UIInteraction DrawUserInterface(int screenWidth,
             if (isSunSpotHovering && mouseClicked)
             {
                 result.sunSpotToggled = true;
+            }
+
+            currentY += checkboxHeight + PANEL_PADDING / 2;
+
+            // ==================================
+            // Cities Checkbox
+            // ==================================
+            float citiesY = currentY;
+            bool isCitiesHovering =
+                (mouseX >= cbX && mouseX <= cbX + cbItemW && mouseY >= citiesY && mouseY <= citiesY + checkboxHeight);
+
+            // Checkbox box
+            float citiesBoxY = citiesY + (checkboxHeight - cbSize) / 2;
+            glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
+            glBegin(GL_QUADS);
+            glVertex2f(cbX, citiesBoxY);
+            glVertex2f(cbX + cbSize, citiesBoxY);
+            glVertex2f(cbX + cbSize, citiesBoxY + cbSize);
+            glVertex2f(cbX, citiesBoxY + cbSize);
+            glEnd();
+
+            // Checkbox border
+            glColor4f(isCitiesHovering ? 0.6f : 0.4f,
+                      isCitiesHovering ? 0.6f : 0.4f,
+                      isCitiesHovering ? 0.65f : 0.45f,
+                      0.9f);
+            glLineWidth(1.5f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(cbX, citiesBoxY);
+            glVertex2f(cbX + cbSize, citiesBoxY);
+            glVertex2f(cbX + cbSize, citiesBoxY + cbSize);
+            glVertex2f(cbX, citiesBoxY + cbSize);
+            glEnd();
+
+            // Checkmark if enabled
+            if (g_economyRenderer.getShowCityLabels())
+            {
+                glColor3f(0.3f, 0.9f, 0.4f);
+                glLineWidth(2.0f);
+                glBegin(GL_LINES);
+                glVertex2f(cbX + 3, citiesBoxY + cbSize * 0.5f);
+                glVertex2f(cbX + cbSize * 0.4f, citiesBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize * 0.4f, citiesBoxY + cbSize - 3);
+                glVertex2f(cbX + cbSize - 2, citiesBoxY + 2);
+                glEnd();
+                glLineWidth(1.0f);
+            }
+
+            DrawText(cbX + cbSize + 6,
+                     citiesY + 4,
+                     "Cities",
+                     0.75f,
+                     isCitiesHovering ? 0.95f : 0.8f,
+                     isCitiesHovering ? 0.95f : 0.8f,
+                     isCitiesHovering ? 0.95f : 0.8f);
+
+            if (isCitiesHovering && mouseClicked)
+            {
+                result.citiesToggled = true;
             }
 
             currentY += checkboxHeight + PANEL_PADDING / 2;
@@ -3867,7 +4233,7 @@ void SetMeasurementMode(MeasurementMode mode)
     g_measurementMode = mode;
 }
 
-MeasurementResult GetMeasurementResult()
+const MeasurementResult &GetMeasurementResult()
 {
     return g_measurementResult;
 }
@@ -3889,10 +4255,25 @@ void UpdateMeasurementResult(const glm::vec3 &cameraPos,
     g_measurementResult.latitude = 0.0;
     g_measurementResult.longitude = 0.0;
     g_measurementResult.elevation = 0.0f;
+    g_measurementResult.hasColor = false;
+    g_measurementResult.colorR = 0.0f;
+    g_measurementResult.colorG = 0.0f;
+    g_measurementResult.colorB = 0.0f;
+    g_measurementResult.colorRInt = 0;
+    g_measurementResult.colorGInt = 0;
+    g_measurementResult.colorBInt = 0;
 
     if (g_measurementMode == MeasurementMode::None)
     {
         return; // No measurement active
+    }
+
+    // Handle color picker mode separately (reads pixel color from framebuffer)
+    if (g_measurementMode == MeasurementMode::ColorPicker)
+    {
+        // Color picker doesn't need raycasting, it reads directly from framebuffer
+        // This will be handled in entrypoint.cpp where we have access to mouse coordinates
+        return;
     }
 
     // Find closest intersection with celestial bodies

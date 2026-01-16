@@ -11,132 +11,167 @@ uniform sampler2D uColorTexture;
 uniform sampler2D uColorTexture2;
 uniform float uBlendFactor;
 uniform sampler2D uNormalMap;
-uniform sampler2D uHeightmap;             // Landmass heightmap (grayscale)
-uniform sampler2D uNightlights;           // City lights grayscale texture
-uniform sampler2D uMicroNoise;            // Fine-grained noise for per-second flicker
-uniform sampler2D uHourlyNoise;           // Coarse noise for hourly variation
-uniform sampler2D uSpecular;              // Surface specular/roughness (grayscale)
-uniform sampler2D uIceMask;               // Ice coverage mask (current month)
-uniform sampler2D uIceMask2;              // Ice coverage mask (next month)
-uniform sampler2D uLandmassMask;          // Landmass mask (white=land, black=ocean)
-uniform sampler2D uBathymetryDepth;       // Ocean floor depth (0=surface, 1=deepest ~11km)
-uniform sampler2D uBathymetryNormal;      // Ocean floor normal map
-uniform sampler2D uCombinedNormal;        // Combined normal map (landmass + bathymetry) for shadows
-uniform sampler2D uWaterScatteringLUT;    // Single scatter LUT (S1_water) - 4D packed as 2D
-uniform sampler2D uWaterTransmittanceLUT; // Transmittance LUT (T_water) - 2D
-uniform sampler2D uWaterMultiscatterLUT;  // Multiple scatter LUT (Sm_water) - 2D
-uniform int uUseWaterScatteringLUT;       // Whether to use LUT (1) or ray-march (0)
-uniform float uIceBlendFactor;            // Blend factor between ice masks (0-1)
+uniform sampler2D uHeightmap;        // Landmass heightmap (grayscale)
+uniform sampler2D uNightlights;      // City lights grayscale texture
+uniform sampler2D uMicroNoise;       // Fine-grained noise for per-second flicker
+uniform sampler2D uHourlyNoise;      // Coarse noise for hourly variation
+uniform sampler2D uSpecular;         // Surface specular/roughness (grayscale)
+uniform sampler2D uIceMask;          // Ice coverage mask (current month)
+uniform sampler2D uIceMask2;         // Ice coverage mask (next month)
+uniform sampler2D uLandmassMask;     // Landmass mask (white=land, black=ocean)
+uniform sampler2D uBathymetryDepth;  // Ocean floor depth (0=surface, 1=deepest ~11km)
+uniform sampler2D uBathymetryNormal; // Ocean floor normal map
+uniform sampler2D uCombinedNormal;   // Combined normal map (landmass + bathymetry) for shadows
+uniform sampler2D uWindTexture1;     // Wind texture for current month (RG = u, v components)
+uniform sampler2D uWindTexture2;     // Wind texture for next month (RG = u, v components)
+uniform float uWindBlendFactor;      // Blend factor between current and next month (0-1)
+uniform vec2 uWindTextureSize;       // Wind texture resolution (width, height) for UV normalization
+uniform float uIceBlendFactor;       // Blend factor between ice masks (0-1)
 uniform vec3 uLightDir;
 uniform vec3 uLightColor;
 uniform vec3 uMoonDir;   // Direction to moon from Earth
 uniform vec3 uMoonColor; // Moonlight color and intensity (pre-multiplied)
 uniform vec3 uAmbientColor;
-uniform vec3 uPoleDir;     // Planet's north pole direction
-uniform vec3 uCameraPos;   // Camera position for view direction calculations
-uniform int uUseNormalMap; // 0 = disabled, 1 = enabled
-uniform int uUseHeightmap; // 0 = disabled, 1 = enabled
-uniform int uUseSpecular;  // 0 = disabled, 1 = enabled
-uniform float uTime;       // Julian date fraction for animated noise
+uniform vec3 uPoleDir;          // Planet's north pole direction
+uniform vec3 uPrimeMeridianDir; // Planet's prime meridian direction (for coordinate system)
+uniform vec3 uCameraPos;        // Camera position for view direction calculations
+uniform vec3 uCameraDir;        // Camera forward direction
+uniform float uCameraFOV;       // Camera field of view (radians)
+uniform int uUseNormalMap;      // 0 = disabled, 1 = enabled
+uniform int uUseHeightmap;      // 0 = disabled, 1 = enabled
+uniform int uUseSpecular;       // 0 = disabled, 1 = enabled
+uniform float uTime;            // Julian date fraction for animated noise
+uniform int uFlatCircleMode;    // 1 = rendering flat circle for distant sphere, 0 = normal sphere
+uniform vec3 uSphereCenter;     // Sphere center position (for flat circle projection)
+uniform float uSphereRadius;    // Sphere radius (for flat circle projection)
+uniform vec3 uBillboardCenter;  // Billboard center position (closest point on sphere to camera)
 
 // Constants
 const float PI = 3.14159265359;
-const float MAX_DEPTH = 11000.0; // Maximum ocean depth (meters)
 
-// Water scattering LUT resolution (must match preprocessing)
-const float LUT_DEPTH_RES = 64.0;
-const float LUT_MU_SUN_RES = 32.0;
-const float LUT_MU_VIEW_RES = 32.0;
-const float LUT_NU_RES = 32.0;          // Relative angle resolution (scattering angle between view and sun)
-const float LUT_TRANS_DEPTH_RES = 64.0; // Transmittance LUT depth resolution
-const float LUT_TRANS_MU_RES = 32.0;    // Transmittance LUT mu resolution
 
-// Lookup water transmittance from precomputed 2D LUT
-// depth: ocean depth in meters [0, MAX_DEPTH]
-// mu: cos(zenith angle) [-1, 1], where 1 = straight down, -1 = straight up
-// Returns: RGB transmittance exp(−∫ σ_t ds)
-vec3 lookupWaterTransmittanceLUT(float depth, float mu)
+// Ray-sphere intersection - returns the intersection on the same hemisphere as the billboard
+// ro: ray origin (camera position)
+// rd: ray direction (normalized)
+// center: sphere center
+// radius: sphere radius
+// Returns: intersection distance along ray, or -1.0 if no intersection
+// The billboard is always at the closest point on sphere to camera, so we need to use
+// the intersection point on the same hemisphere as that closest point
+float raySphereIntersect(vec3 ro, vec3 rd, vec3 center, float radius)
 {
-    // Normalize inputs
-    // Depth: [0, MAX_DEPTH] -> [0, 1] with square root for better shallow water resolution
-    float depth_normalized = sqrt(clamp(depth / MAX_DEPTH, 0.0, 1.0));
+    vec3 oc = ro - center;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - radius * radius;
+    float disc = b * b - c;
 
-    // mu: [-1, 1] -> [0, 1]
-    float mu_normalized = clamp((mu + 1.0) * 0.5, 0.0, 1.0);
+    if (disc < 0.0)
+    {
+        return -1.0; // No intersection
+    }
 
-    // Convert to texture indices
-    float depth_idx = depth_normalized * (LUT_TRANS_DEPTH_RES - 1.0);
-    float mu_idx = mu_normalized * (LUT_TRANS_MU_RES - 1.0);
+    float h = sqrt(disc);
+    float t0 = -b - h; // Entry point (closest to camera - always use this for near side)
+    float t1 = -b + h; // Exit point (farthest from camera - far side, ignore)
 
-    // Pack into 2D texture coordinates
-    // Transmittance LUT: width = depthRes, height = muRes
-    float lutX = depth_idx / LUT_TRANS_DEPTH_RES;
-    float lutY = mu_idx / LUT_TRANS_MU_RES;
-
-    // Sample LUT
-    return texture2D(uWaterTransmittanceLUT, vec2(lutX, lutY)).rgb;
+    // Always use the near intersection (t0) to ensure we sample the near side of the sphere
+    // This prevents flipping when viewing from different angles relative to the sun
+    if (t0 > 0.0)
+        return t0;
+    return -1.0; // No valid intersection
 }
 
-// Lookup water multiple scattering from precomputed 2D LUT
-// depth: ocean depth in meters [0, MAX_DEPTH]
-// mu: cos(zenith angle) [-1, 1], where 1 = straight down, -1 = straight up
-// Returns: RGB multiple scattering contribution
-vec3 lookupWaterMultiscatterLUT(float depth, float mu)
+// Manual atan2 implementation for GLSL 120 compatibility
+// Returns angle in range [-π, π]
+float atan2_manual(float y, float x)
 {
-    // Normalize inputs (same as transmittance LUT)
-    float depth_normalized = sqrt(clamp(depth / MAX_DEPTH, 0.0, 1.0));
-    float mu_normalized = clamp((mu + 1.0) * 0.5, 0.0, 1.0);
-
-    // Convert to texture indices
-    float depth_idx = depth_normalized * (LUT_TRANS_DEPTH_RES - 1.0);
-    float mu_idx = mu_normalized * (LUT_TRANS_MU_RES - 1.0);
-
-    // Pack into 2D texture coordinates
-    // Multiscatter LUT: width = depthRes, height = muRes (same as transmittance)
-    float lutX = depth_idx / LUT_TRANS_DEPTH_RES;
-    float lutY = mu_idx / LUT_TRANS_MU_RES;
-
-    // Sample LUT
-    return texture2D(uWaterMultiscatterLUT, vec2(lutX, lutY)).rgb;
+    if (x > 0.0)
+    {
+        return atan(y / x);
+    }
+    else if (x < 0.0 && y >= 0.0)
+    {
+        return atan(y / x) + PI;
+    }
+    else if (x < 0.0 && y < 0.0)
+    {
+        return atan(y / x) - PI;
+    }
+    else if (abs(x) < 0.0001 && y > 0.0)
+    {
+        return PI * 0.5;
+    }
+    else if (abs(x) < 0.0001 && y < 0.0)
+    {
+        return -PI * 0.5;
+    }
+    else
+    {
+        return 0.0; // x == 0 && y == 0
+    }
 }
 
-// Lookup water scattering from precomputed 4D LUT (packed as 2D)
-// depth: ocean depth in meters [0, MAX_DEPTH]
-// mu_sun: cos(angle between sun and surface normal) [-1, 1]
-// mu_view: cos(angle between view and surface normal) [-1, 1]
-// nu: cos(angle between view and sun directions) [-1, 1]
-//     This accounts for relative camera rotation relative to sunlight direction
-// Returns: RGB color transform
-vec3 lookupWaterScatteringLUT(float depth, float mu_sun, float mu_view, float nu)
+// Convert direction vector to equirectangular UV coordinates
+// Uses the same coordinate system as the C++ code (sphere's local coordinate system)
+// dir: normalized direction vector in world space
+// poleDir: planet's north pole direction (normalized)
+// primeMeridianDir: planet's prime meridian direction (for computing east vector)
+// Returns: equirectangular UV coordinates (u: 0-1 maps to longitude -π to +π, v: 0-1 maps to latitude +π/2 to -π/2)
+vec2 directionToEquirectUV(vec3 dir, vec3 poleDir, vec3 primeMeridianDir)
 {
-    // Normalize inputs
-    // Depth: [0, MAX_DEPTH] -> [0, 1] with square root for better shallow water resolution
-    float depth_normalized = sqrt(clamp(depth / MAX_DEPTH, 0.0, 1.0));
+    // Build the same coordinate system as C++ code (exact match)
+    // north = poleDir (already normalized)
+    vec3 north = poleDir;
 
-    // mu_sun: [-1, 1] -> [0, 1]
-    float mu_sun_normalized = clamp((mu_sun + 1.0) * 0.5, 0.0, 1.0);
+    // Compute east vector exactly as C++ code does:
+    // east = primeDir - dot(primeDir, north) * north
+    vec3 east = primeMeridianDir - dot(primeMeridianDir, north) * north;
+    float eastLen = length(east);
+    if (eastLen < 0.001)
+    {
+        // Degenerate case - use same fallback as C++ code
+        if (abs(north.y) < 0.9)
+        {
+            east = cross(north, vec3(0.0, 1.0, 0.0));
+        }
+        else
+        {
+            east = cross(north, vec3(1.0, 0.0, 0.0));
+        }
+        eastLen = length(east);
+    }
+    east = east / eastLen;
 
-    // mu_view: [-1, 1] -> [0, 1]
-    float mu_view_normalized = clamp((mu_view + 1.0) * 0.5, 0.0, 1.0);
+    // Compute south90 = cross(north, east) - this is the third basis vector
+    vec3 south90 = cross(north, east);
 
-    // nu: [-1, 1] -> [0, 1] (relative angle between view and sun)
-    float nu_normalized = clamp((nu + 1.0) * 0.5, 0.0, 1.0);
+    // Project direction vector onto sphere's local coordinate system (same as C++ code)
+    float localX = dot(dir, east);
+    float localY = dot(dir, north);
+    float localZ = dot(dir, south90);
 
-    // Convert to texture indices
-    float depth_idx = depth_normalized * (LUT_DEPTH_RES - 1.0);
-    float mu_sun_idx = mu_sun_normalized * (LUT_MU_SUN_RES - 1.0);
-    float mu_view_idx = mu_view_normalized * (LUT_MU_VIEW_RES - 1.0);
-    float nu_idx = nu_normalized * (LUT_NU_RES - 1.0);
+    // Normalize (should already be normalized, but ensure)
+    float len = sqrt(localX * localX + localY * localY + localZ * localZ);
+    if (len < 0.001)
+    {
+        return vec2(0.5, 0.5); // Degenerate case
+    }
+    localX /= len;
+    localY /= len;
+    localZ /= len;
 
-    // Pack into 2D texture coordinates
-    // 4D -> 2D packing: width = depthRes * muSunRes * nuRes, height = muRes
-    // x = depth_idx + mu_sun_idx * depthRes + nu_idx * (depthRes * muSunRes)
-    float lutX = (depth_idx + mu_sun_idx * LUT_DEPTH_RES + nu_idx * (LUT_DEPTH_RES * LUT_MU_SUN_RES)) /
-                 (LUT_DEPTH_RES * LUT_MU_SUN_RES * LUT_NU_RES);
-    float lutY = mu_view_idx / LUT_MU_VIEW_RES;
+    // Convert to latitude/longitude using same formula as C++ code
+    // Latitude: asin(localY) - angle from equator to north pole
+    float latitude = asin(clamp(localY, -1.0, 1.0));
 
-    // Sample LUT
-    return texture2D(uWaterScatteringLUT, vec2(lutX, lutY)).rgb;
+    // Longitude: atan2(localZ, localX) - angle around north pole from east
+    float longitude = atan2_manual(localZ, localX);
+
+    // Convert lat/lon to equirectangular UV (same as C++ latLonToUV)
+    float u = (longitude / PI + 1.0) * 0.5; // 0 to 1
+    float v = 0.5 - (latitude / PI);        // 0 to 1
+
+    return vec2(u, v);
 }
 
 // Convert equirectangular UV to sinusoidal UV
@@ -229,41 +264,1031 @@ float noise2D(vec2 p)
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-// Procedural Ocean Wave Normal Perturbation
-// Computes wave perturbations in tangent space and transforms to world space
-
-vec3 getOceanWaveNormal(vec2 texUV, vec3 baseNormal, vec3 tangent, vec3 bitangent, float time)
+// Fractal Brownian Motion for wave generation
+// GLSL 120 requires compile-time constant loop bounds, so we use a fixed 3 octaves
+float fbm(vec2 p, int octaves)
 {
-    // CRITICAL: Use texture UV coordinates (already mapped to sphere's surface) instead of world position
-    // This ensures noise sampling accounts for sphere curvature and follows the surface correctly
-    // Texture UVs are in sinusoidal projection space, which properly maps to the sphere
-    vec2 noiseUV = texUV * 8.0; // Scale for appropriate wave frequency
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
 
-    float n1 = noise2D(noiseUV * 3.0 + vec2(time * 0.01, time * 0.007));
-    float n2 = noise2D(noiseUV * 3.0 + vec2(0.5, 0.5) + vec2(time * 0.008, time * 0.012));
-    float n3 = noise2D(noiseUV * 12.0 + vec2(time * 0.02, time * 0.015));
-    float n4 = noise2D(noiseUV * 12.0 + vec2(0.3, 0.7) + vec2(time * 0.018, time * 0.022));
-    float n5 = noise2D(noiseUV * 50.0 + vec2(time * 0.03, time * 0.025));
+    // Unroll loop for GLSL 120 compatibility (max 3 octaves)
+    value += amplitude * noise2D(p * frequency);
+    amplitude *= 0.5;
+    frequency *= 2.0;
 
-    // Compute perturbations in tangent space (X = tangent/east, Y = bitangent/north, Z = normal/up)
-    float nx = (n1 - 0.5) * 0.02 + (n3 - 0.5) * 0.01 + (n5 - 0.5) * 0.005;
-    float ny = (n2 - 0.5) * 0.02 + (n4 - 0.5) * 0.01;
-    vec3 normalPerturbTangent = vec3(nx, ny, 1.0); // Z component is 1.0 (pointing along base normal)
+    if (octaves > 1)
+    {
+        value += amplitude * noise2D(p * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
 
-    // Transform from tangent space to world space using TBN matrix
-    // TBN: Column 0 = tangent (east), Column 1 = bitangent (north), Column 2 = normal (up)
-    // The sphere's surface normal (baseNormal) properly warps the tangent-space normal
-    // to follow the sphere's curvature at this point
-    mat3 TBN = mat3(tangent, bitangent, baseNormal);
-    vec3 waveNormal = normalize(TBN * normalPerturbTangent);
+    if (octaves > 2)
+    {
+        value += amplitude * noise2D(p * frequency);
+    }
 
-    return waveNormal;
+    return value;
 }
 
-// Light Path Length Through Atmosphere and Water
+// Compute wind-based noise offset for localized wave propagation
+// Samples the wind texture and returns an offset vector in UV space
+// The offset is the inverse of the wind direction, scaled by wind speed and time
+// This creates localized differences in noise sampling based on wind direction
+// Time-dependent accumulation creates visible wave movement
+vec2 computeWindNoiseOffset(vec2 uv, float time)
+{
+    // Convert equirectangular UV to sinusoidal UV before sampling
+    vec2 windUV = toSinusoidalUV(uv);
+    // Add half-pixel offset for proper sampling at pixel centers
+    windUV = windUV + 0.5 / uWindTextureSize;
 
+    // Sample both wind textures
+    // Wind texture format: GL_LUMINANCE_ALPHA stores R=u (red/LUMINANCE) and G=v (green/ALPHA)
+    // Sample red presence (R channel) for u direction and green presence (G channel) for v direction
+    // GL_LUMINANCE_ALPHA format samples as (L, L, L, A), so we use .ra to get (u, v)
+    vec4 windSample1Full = texture2D(uWindTexture1, windUV);
+    vec4 windSample2Full = texture2D(uWindTexture2, windUV);
+    // Extract u component from red/LUMINANCE channel, v component from green/ALPHA channel
+    vec2 windSample1 = vec2(windSample1Full.r, windSample1Full.a); // .ra = (u, v) from LUMINANCE_ALPHA
+    vec2 windSample2 = vec2(windSample2Full.r, windSample2Full.a); // .ra = (u, v) from LUMINANCE_ALPHA
+
+    // Blend between the two months
+    vec2 windSample = mix(windSample1, windSample2, uWindBlendFactor);
+
+    // Wind values are normalized: [-1, 1] range (from [-50, 50] m/s)
+    // Convert from [0, 1] to actual wind speed in m/s
+    // Combine u (red) and v (green) components to produce directional vector
+    vec2 windSpeedMS = (windSample * 2.0 - 1.0) * 50.0; // Wind speed in m/s (range: -50 to +50)
+
+    // Compute wind magnitude for scaling
+    float windMagnitudeMS = length(windSpeedMS); // Wind speed magnitude in m/s
+
+    // If wind is significant, compute the inverse direction offset
+    // The offset is the inverse of the wind direction, scaled by wind speed and time
+    // This creates localized noise sampling differences based on wind
+    // Using the inverse direction means we sample noise "upwind" to create wave propagation effect
+    // Time-dependent accumulation creates visible wave movement over time
+    if (windMagnitudeMS > 1.0)
+    {
+        // Normalize to get direction
+        vec2 windDirection = windSpeedMS / windMagnitudeMS;
+
+        // Convert wind speed from m/s to UV units per second
+        // Earth's circumference at equator: ~40,000 km = 40,000,000 m
+        // In UV space (sinusoidal projection), 1.0 UV unit ≈ 40,000 km at equator
+        const float EARTH_CIRCUMFERENCE_M = 40000000.0;
+        const float UV_TO_METERS = EARTH_CIRCUMFERENCE_M;
+
+        // Convert wind speed to UV space: m/s → UV units/s
+        float windSpeedUV = windMagnitudeMS / UV_TO_METERS;
+
+        // Accumulate offset over time to create visible movement
+        // Scale factor amplifies the effect for natural wave movement
+        // Typical wind speeds: 5-15 m/s, storms up to 20-30 m/s
+        // Wave propagation speed is typically slower than wind speed (about 60-80% of wind speed)
+        // Use a scale factor to create visible but natural wave movement
+        // The scale factor accounts for the fact that waves propagate slower than wind
+        // and amplifies the effect to be visible at the scale of the Earth
+        float secondsInDay = time * 86400.0;
+        float offsetScale =
+            windSpeedUV * secondsInDay * 25.0; // Scale factor for natural wave movement (amplified for visibility)
+
+        // Use inverse direction (opposite of wind direction) for noise offset
+        // This creates wave propagation in the direction the wind is blowing
+        vec2 noiseOffset = -windDirection * offsetScale;
+
+        return noiseOffset;
+    }
+    else
+    {
+        // No significant wind - return zero offset
+        return vec2(0.0);
+    }
+}
+
+// Compute noise gradient at a given UV position
+// Returns the gradient vector (direction of steepest ascent in noise)
+vec2 computeNoiseGradient(vec2 uv, float scale)
+{
+    float eps = 0.001;
+    float noiseCenter = fbm(uv * scale, 3);
+    float noiseX = fbm((uv + vec2(eps, 0.0)) * scale, 3);
+    float noiseY = fbm((uv + vec2(0.0, eps)) * scale, 3);
+
+    // Compute gradient (finite differences)
+    vec2 gradient = vec2((noiseX - noiseCenter) / eps, (noiseY - noiseCenter) / eps);
+    return normalize(gradient);
+}
+
+// ============================================================
+// Shoreline SDF Functions
+// ============================================================
+// Consolidated SDF helpers are defined in signed-distance-fields.glsl
+// These functions are duplicated here since GLSL 120 doesn't support #include
+// For future use: see src/materials/helpers/signed-distance-fields.glsl
+
+// Compute approximate Signed Distance Field (SDF) from landmass mask
+// Returns distance to nearest shoreline (positive in ocean, negative in land)
+// Uses gradient-based approximation for efficiency
+float computeShorelineSDF(vec2 uv)
+{
+    // Sample mask (1.0 = land, 0.0 = ocean)
+    float maskValue = texture2D(uLandmassMask, uv).r;
+
+    // Narrow-band optimization: early exit for deep empty/solid regions
+    if (maskValue < 0.01)
+    {
+        return 1.0; // Deep ocean - far from boundary
+    }
+    if (maskValue > 0.99)
+    {
+        return -1.0; // Deep land - far from boundary
+    }
+
+    // Near boundary - compute approximate SDF using gradient magnitude
+    float eps = 0.003; // Sampling offset for gradient computation
+
+    // Sample mask at nearby points to compute gradient
+    float maskX = texture2D(uLandmassMask, uv + vec2(eps, 0.0)).r;
+    float maskY = texture2D(uLandmassMask, uv + vec2(0.0, eps)).r;
+    float maskXNeg = texture2D(uLandmassMask, uv + vec2(-eps, 0.0)).r;
+    float maskYNeg = texture2D(uLandmassMask, uv + vec2(0.0, -eps)).r;
+
+    // Compute gradient magnitude (how quickly mask changes)
+    vec2 gradient = vec2((maskX - maskXNeg) / (2.0 * eps), (maskY - maskYNeg) / (2.0 * eps));
+    float gradientMag = length(gradient);
+
+    // Approximate distance to boundary using gradient magnitude
+    float approximateDist = 0.0;
+    if (gradientMag > 0.01)
+    {
+        float distToBoundary = abs(maskValue - 0.5) / gradientMag;
+        approximateDist = distToBoundary;
+    }
+    else
+    {
+        approximateDist = abs(maskValue - 0.5) * 10.0; // Rough estimate
+    }
+
+    // Convert to signed distance (positive in ocean, negative in land)
+    return maskValue < 0.5 ? approximateDist : -approximateDist;
+}
+
+// Compute shoreline normal from SDF gradient
+// Returns normalized direction pointing from land toward ocean (shoreline normal)
+vec2 computeShorelineNormal(vec2 uv)
+{
+    // Compute SDF gradient using finite differences
+    float eps = 0.003;
+
+    float sdfCenter = computeShorelineSDF(uv);
+    float sdfX = computeShorelineSDF(uv + vec2(eps, 0.0));
+    float sdfY = computeShorelineSDF(uv + vec2(0.0, eps));
+
+    // Compute gradient of SDF
+    vec2 sdfGradient = vec2((sdfX - sdfCenter) / eps, (sdfY - sdfCenter) / eps);
+
+    // Normalize gradient to get normal
+    float gradientLen = length(sdfGradient);
+    if (gradientLen < 0.01)
+    {
+        return vec2(0.0, 0.0); // Not near a boundary
+    }
+
+    // Normalize to get unit normal (points from land toward ocean)
+    return sdfGradient / gradientLen;
+}
+
+// Apply shoreline reflection to wave trajectory using SDF-based boundary detection
+vec2 applyShorelineReflection(vec2 trajectory, vec2 uv, float reflectionStrength)
+{
+    // Compute SDF at current location
+    float sdf = computeShorelineSDF(uv);
+
+    // Narrow-band optimization: only process near boundaries
+    float reflectionThreshold = 0.05; // UV units
+
+    if (abs(sdf) > reflectionThreshold)
+    {
+        return trajectory; // Too far from shoreline
+    }
+
+    // Must be in ocean (positive SDF) to reflect
+    if (sdf <= 0.0)
+    {
+        return trajectory; // On land - no reflection
+    }
+
+    // Get shoreline normal from SDF gradient
+    vec2 shorelineNormal = computeShorelineNormal(uv);
+
+    float normalLen = length(shorelineNormal);
+    if (normalLen < 0.01)
+    {
+        return trajectory; // Not near shoreline
+    }
+
+    // Check if trajectory is pointing toward land
+    float dotProduct = dot(trajectory, shorelineNormal);
+
+    if (dotProduct < 0.0)
+    {
+        // Wave is approaching land - reflect it
+        vec2 reflectedTrajectory = trajectory - 2.0 * dotProduct * shorelineNormal;
+
+        // Compute reflection strength based on proximity to shoreline
+        float proximityFactor = 1.0 - smoothstep(0.0, reflectionThreshold, sdf);
+
+        // Blend between original and reflected trajectory
+        vec2 blendedTrajectory = normalize(mix(trajectory, reflectedTrajectory, reflectionStrength * proximityFactor));
+
+        // Apply damping near boundaries to prevent energy buildup
+        float dampingFactor = clamp(sdf / reflectionThreshold, 0.3, 1.0);
+
+        return blendedTrajectory * dampingFactor;
+    }
+
+    // Wave is moving away from land - no reflection needed
+    return trajectory;
+}
+
+// Compute base trajectory vector (shared "current trajectory tensor")
+// This stores a 2D momentum vector for every point on the surface
+// Wind acts as a momentum modifier - accumulates over time
+// Low wind values maintain existing momentum, large values change momentum dramatically
+vec2 computeBaseTrajectory(vec2 uv, float time)
+{
+    // Sample wind textures (two 2D textures for current and next month, blend between them)
+    // Convert equirectangular UV to sinusoidal UV before sampling
+    vec2 windUV = toSinusoidalUV(uv);
+    // Normalize UV coordinates for wind texture resolution
+    // Add half-pixel offset for proper sampling at pixel centers
+    // This accounts for the actual texture resolution (1024x512) for accurate sampling
+    windUV = windUV + 0.5 / uWindTextureSize;
+
+    // Sample both wind textures
+    // Note: Textures are stored as GL_LUMINANCE_ALPHA, which samples as (L, L, L, A)
+    // So we use .ra to get (LUMINANCE=u wind, ALPHA=v wind) = (u, v) force vector
+    vec4 windSample1Full = texture2D(uWindTexture1, windUV);
+    vec4 windSample2Full = texture2D(uWindTexture2, windUV);
+    vec2 windSample1 = vec2(windSample1Full.r, windSample1Full.a); // .ra = (u, v) from LUMINANCE_ALPHA
+    vec2 windSample2 = vec2(windSample2Full.r, windSample2Full.a); // .ra = (u, v) from LUMINANCE_ALPHA
+
+    // Blend between the two months
+    vec2 windSample = mix(windSample1, windSample2, uWindBlendFactor);
+
+    // Wind values are normalized: [-1, 1] range (from [-50, 50] m/s)
+    // Convert from [0, 1] to actual wind speed in m/s
+    // This is the wind force vector that modifies momentum
+    vec2 windForceMS = (windSample * 2.0 - 1.0) * 50.0; // Wind force in m/s (range: -50 to +50)
+
+    // Convert wind force to UV space for momentum accumulation
+    // Earth's circumference at equator: ~40,000 km = 40,000,000 m
+    const float EARTH_CIRCUMFERENCE_M = 40000000.0;
+    const float UV_TO_METERS = EARTH_CIRCUMFERENCE_M;
+    vec2 windForceUV = windForceMS / UV_TO_METERS; // Wind force in UV units per second
+
+    // Accumulate momentum over time: momentum = wind_force * time_scale
+    // This simulates momentum accumulation - low wind = small changes, high wind = large changes
+    // Time scale controls how quickly momentum accumulates (smaller = slower accumulation)
+    // Increased accumulation rate to make medium waves more responsive and less static
+    float momentumTimeScale = 0.02; // Accumulation rate (increased from 0.01 for better medium wave response)
+    float secondsInDay = time * 86400.0;
+    vec2 accumulatedMomentum = windForceUV * secondsInDay * momentumTimeScale;
+
+    // Use accumulated momentum as trajectory
+    // Low wind values result in small momentum (maintains existing direction)
+    // Large wind values result in large momentum (changes direction dramatically)
+    vec2 windTrajectory = accumulatedMomentum;
+
+    // Apply shoreline reflection - waves bounce off shorelines
+    // Reflection strength: 0.15 = subtle reflection near shorelines
+    // Normalize for reflection calculation, then restore magnitude
+    float momentumMagnitude = length(windTrajectory);
+    if (momentumMagnitude > 0.001)
+    {
+        vec2 normalizedTrajectory = windTrajectory / momentumMagnitude;
+        vec2 reflectedTrajectory = applyShorelineReflection(normalizedTrajectory, uv, 0.15);
+        windTrajectory = reflectedTrajectory * momentumMagnitude; // Restore magnitude after reflection
+    }
+
+    return windTrajectory;
+}
+
+// Compute rotation factor for a specific layer by sampling noise
+// Returns rotation factor from -1 to 1
+float computeLayerRotationFactor(vec2 uv, float scale, float time, vec2 noiseSpaceOffset)
+{
+    // Sample noise to get rotation factor from -1 to 1
+    // This determines how much to rotate from the current trajectory
+    float noiseValue = fbm((uv + noiseSpaceOffset) * scale, 3);
+    float rotationFactor = noiseValue * 2.0 - 1.0; // Map from [0,1] to [-1,1]
+
+    return rotationFactor;
+}
+
+// Compute trajectory vector at a given UV position
+// Pure wind-based trajectory without noise distortions
+// Waves move based solely on wind direction and accumulated momentum
+// Scale-dependent momentum accumulation: medium waves accumulate more for better visibility
+vec2 computeTrajectory(vec2 uv,
+                       float scale,
+                       float time,
+                       vec2 noiseSpaceOffset,
+                       vec2 largeDistortion,
+                       vec2 mediumDistortion,
+                       vec2 smallDistortion,
+                       float largeWeight,
+                       float mediumWeight,
+                       float smallWeight)
+{
+    // Get shared base trajectory (pure wind direction, no noise)
+    vec2 windTrajectory = computeBaseTrajectory(uv, time);
+
+    // Scale momentum accumulation based on wave scale
+    // Medium waves (scale ~100) need more accumulation to appear less static
+    // Small waves (scale ~200+) accumulate naturally, large waves (scale ~50) accumulate less
+    // Normalize scale to create accumulation multiplier: medium waves get ~2x, small waves ~1x, large waves ~0.5x
+    float scaleNormalized = scale / 100.0;                    // Normalize to medium wave scale
+    float momentumMultiplier = 1.0 + scaleNormalized * 0.5;   // Range: 0.5x to 1.5x based on scale
+    momentumMultiplier = clamp(momentumMultiplier, 0.5, 2.0); // Clamp to reasonable range
+
+    // Apply scale-dependent momentum accumulation
+    // Medium waves accumulate more momentum, making them more responsive to wind
+    windTrajectory = windTrajectory * momentumMultiplier;
+
+    // Return pure wind trajectory without adding noise-based distortions
+    // This ensures advection is based solely on wind direction and accumulated momentum
+    return windTrajectory;
+}
+
+// Compute directional distortion for a specific layer
+// Samples noise to get rotation factor and computes how it rotates the current trajectory
+// Returns the directional change (distortion) that should be added to the trajectory tensor
+vec2 computeLayerDirectionalDistortion(vec2 uv, float scale, float time, vec2 noiseSpaceOffset, vec2 currentTrajectory)
+{
+    // Get rotation factor from noise sampling (-1 to 1)
+    float rotationFactor = computeLayerRotationFactor(uv, scale, time, noiseSpaceOffset);
+
+    // Rotation factor interpretation:
+    // 0 = use same force as current trajectory (no rotation)
+    // 1 = rotate 90 degrees right from current trajectory
+    // -1 = rotate 90 degrees left from current trajectory
+    // -0.5 = rotate 45 degrees left from current trajectory
+    float rotationAngle = rotationFactor * PI * 0.5; // -90° to +90° range
+
+    // Rotate current trajectory by the computed angle
+    float cosA = cos(rotationAngle);
+    float sinA = sin(rotationAngle);
+    vec2 rotatedTrajectory = vec2(currentTrajectory.x * cosA - currentTrajectory.y * sinA,
+                                  currentTrajectory.x * sinA + currentTrajectory.y * cosA);
+
+    // Return the directional distortion (difference from current trajectory)
+    return normalize(rotatedTrajectory) - currentTrajectory;
+}
+
+// Helper function to compute anisotropic wave height with advection
+// Samples noise at current location and advected location (along trajectory)
+// This creates the progressive force system with locally variable drift
+// Each layer uses a distinct noise space offset to sample from different "image databases"
+// Trajectory is constrained to the tangent plane to ensure it always points upward
+// Considers wave-perturbed normal occlusion from sun on dark side
+// Uses shared trajectory tensor with accumulated directional distortions
+float computeAnisotropicWave(vec2 uv,
+                             vec2 dir,
+                             float scale,
+                             vec2 timeOffset,
+                             float timeScale,
+                             float time,
+                             vec2 noiseSpaceOffset,
+                             vec3 surfaceNormal,
+                             vec3 tangent,
+                             vec3 bitangent,
+                             vec3 sunDirection,
+                             vec2 largeDistortion,
+                             vec2 mediumDistortion,
+                             vec2 smallDistortion,
+                             float largeWeight,
+                             float mediumWeight,
+                             float smallWeight)
+{
+    // Get trajectory vector for this location
+    // Uses shared base trajectory (accumulated momentum) without noise distortions
+    vec2 trajectory2D = computeTrajectory(uv,
+                                          scale,
+                                          time,
+                                          noiseSpaceOffset,
+                                          largeDistortion,
+                                          mediumDistortion,
+                                          smallDistortion,
+                                          largeWeight,
+                                          mediumWeight,
+                                          smallWeight);
+
+    // Preserve momentum magnitude before normalization (needed for speed calculation)
+    float momentumMagnitude = length(trajectory2D);
+
+    // Convert 2D trajectory to 3D space using tangent and bitangent
+    vec3 trajectory3D = tangent * trajectory2D.x + bitangent * trajectory2D.y;
+
+    // Project trajectory onto tangent plane (remove component along surface normal)
+    // This ensures the trajectory always points along the surface, never into the sphere
+    float normalComponent = dot(trajectory3D, surfaceNormal);
+    vec3 trajectoryTangent = trajectory3D - surfaceNormal * normalComponent;
+
+    // Normalize the projected trajectory for direction
+    float trajectoryLen = length(trajectoryTangent);
+    if (trajectoryLen > 0.001)
+    {
+        trajectoryTangent = trajectoryTangent / trajectoryLen;
+    }
+    else
+    {
+        // Fallback: use tangent direction if trajectory is degenerate
+        trajectoryTangent = tangent;
+        momentumMagnitude = 0.0; // No momentum if degenerate
+    }
+
+    // Convert back to 2D tangent space
+    // This ensures the trajectory is constrained to the tangent plane
+    // Direction is normalized, but we preserve magnitude separately for speed
+    vec2 trajectory = vec2(dot(trajectoryTangent, tangent), dot(trajectoryTangent, bitangent));
+
+    // Store momentum magnitude as a separate variable for speed calculation
+    // This represents accumulated wind force - affects both direction and speed
+
+    // Compute preliminary wave-perturbed normal to check occlusion
+    // Use advection-based gradient computation to match the wave height advection
+    // This ensures the normal perturbation accurately represents the advected wave state
+
+    // Compute advection for gradient (same as wave computation)
+    // Physics-based wave propagation using realistic ocean wave speeds
+    float secondsInDay = time * 86400.0;
+
+    // Physics constants:
+    // - Earth's circumference at equator: ~40,000 km = 40,000,000 m
+    // - In UV space (sinusoidal projection), 1.0 UV unit ≈ 40,000 km at equator
+    // - Typical ocean wave speeds: 7.8-23.4 m/s (for periods 5-15s)
+    // - Wind speeds: 5-15 m/s typical, up to 20-30 m/s in storms
+    // - Wave phase velocity: c ≈ 1.56 × T (m/s) for deep water waves
+
+    // Convert wave speed from m/s to UV units per second
+    // 1 UV unit = 40,000,000 m, so 1 m/s = 1/40,000,000 UV units/s
+    const float EARTH_CIRCUMFERENCE_M = 40000000.0;   // meters
+    const float UV_TO_METERS = EARTH_CIRCUMFERENCE_M; // 1 UV unit = circumference in meters
+
+    // Typical ocean wave period: 8-12 seconds (moderate sea state)
+    // Wave speed: c = 1.56 × T ≈ 12.5-18.7 m/s for typical waves
+    // Use accumulated momentum magnitude to scale wave speed
+    // Momentum magnitude represents accumulated wind force - larger momentum = faster waves
+    // momentumMagnitude is preserved from trajectory calculation above
+
+    // Base wave speed: typical ocean wave ~12 m/s (period ~7.7s)
+    // Scale by momentum magnitude - this represents how much wind has accumulated
+    // Low momentum (low wind) = slower waves, high momentum (high wind) = faster waves
+    // Convert momentum magnitude (in UV units) back to m/s for speed calculation
+    // (EARTH_CIRCUMFERENCE_M and UV_TO_METERS already declared above)
+    float momentumMS = momentumMagnitude * UV_TO_METERS; // Convert UV momentum to m/s
+
+    // Base speed scales with momentum magnitude
+    // Normalize momentum to reasonable range: 0-30 m/s typical wind range
+    float normalizedMomentum = clamp(momentumMS / 30.0, 0.0, 1.0);
+    float baseWaveSpeedMS = 12.0;                                                     // m/s (typical ocean wave speed)
+    float windInfluencedSpeedMS = baseWaveSpeedMS * (0.5 + normalizedMomentum * 1.0); // 6-24 m/s range
+
+    // Vary speed based on wave scale: larger waves (smaller scale) move slower, smaller waves (larger scale) move faster
+    // Scale factor: larger scale values mean smaller waves, so they should move faster
+    // Inverse relationship: speed increases with scale
+    // Typical scale values range from ~1.0 (large waves) to ~10.0+ (small waves)
+    // Use a power curve to create natural speed variation: speed ∝ scale^power
+    float scaleSpeedFactor = pow(scale / 5.0, 1.5); // Normalize to ~5.0, then apply power curve
+    // Clamp to reasonable range: 0.3x to 2.0x speed variation
+    scaleSpeedFactor = clamp(scaleSpeedFactor, 0.3, 2.0);
+
+    // Apply scale-based speed variation
+    float scaleAdjustedSpeedMS = windInfluencedSpeedMS * scaleSpeedFactor;
+
+    // Convert to UV space: m/s → UV units/s
+    float waveSpeedUV = scaleAdjustedSpeedMS / UV_TO_METERS; // UV units per second
+
+    // Advection accumulates over time to create progressive wave propagation
+    // The advection distance is the distance the wave has traveled
+    // Larger waves (smaller scale) have less advection, smaller waves (larger scale) have more advection
+    float advectionDistance = waveSpeedUV * secondsInDay; // UV units
+
+    // Advect backwards: sample noise where the wave "came from"
+    // This creates proper wave propagation with momentum - the noise encodes the advected state
+    vec2 advectionVector = -trajectory * advectionDistance;
+
+    // Check if advected location hits a shoreline using SDF
+    // This creates realistic wave bouncing when waves hit shorelines
+    vec2 advectedUVForReflection = uv + advectionVector;
+    float sdfAtAdvected = computeShorelineSDF(advectedUVForReflection);
+
+    // Reflection threshold: reflect if within this distance of shoreline
+    float reflectionThreshold = 0.05; // UV units
+
+    // If advected location is on land or very close to shore, reflect the advection vector
+    if (sdfAtAdvected <= reflectionThreshold)
+    {
+        // Get shoreline normal at advected location using SDF gradient
+        vec2 shorelineNormal = computeShorelineNormal(advectedUVForReflection);
+        float normalLen = length(shorelineNormal);
+
+        if (normalLen > 0.01)
+        {
+            // Reflect advection vector off shoreline
+            vec2 advectionDir = normalize(advectionVector);
+            float dotProduct = dot(advectionDir, shorelineNormal);
+
+            if (dotProduct < 0.0)
+            {
+                // Advection is pointing toward land - reflect it
+                // Standard reflection formula: R = I - 2 * dot(I, N) * N
+                vec2 reflectedDir = advectionDir - 2.0 * dotProduct * shorelineNormal;
+
+                // Compute reflection strength based on SDF proximity
+                // Closer to boundary = stronger reflection
+                float proximityFactor = 1.0 - smoothstep(0.0, reflectionThreshold, max(0.0, sdfAtAdvected));
+
+                // Blend between original and reflected advection
+                // Use subtle reflection: 0.2 instead of 0.8 for more natural wave behavior
+                vec2 blendedDir = normalize(mix(advectionDir, reflectedDir, proximityFactor * 0.2));
+
+                // Apply damping to prevent energy buildup at boundaries
+                float dampingFactor = clamp(max(0.0, sdfAtAdvected) / reflectionThreshold, 0.2, 1.0);
+
+                advectionVector = blendedDir * advectionDistance * dampingFactor;
+            }
+        }
+    }
+
+    // Sample wave state at advected locations for gradient
+    float eps = 0.001;
+    vec2 advectedUVCenter = uv + advectionVector;
+    vec2 advectedUVX = uv + vec2(eps, 0.0) + advectionVector;
+    vec2 advectedUVY = uv + vec2(0.0, eps) + advectionVector;
+
+    // Compute wind-based noise offset for localized wave propagation
+    // This creates localized differences in noise sampling based on wind direction
+    // Time-dependent accumulation creates visible wave movement
+    vec2 windNoiseOffset = computeWindNoiseOffset(uv, time);
+
+    // Apply anisotropic distortion
+    float projCenter = dot(advectedUVCenter * scale, dir);
+    float projX = dot(advectedUVX * scale, dir);
+    float projY = dot(advectedUVY * scale, dir);
+
+    vec2 anisotropicUVCenter = (advectedUVCenter + noiseSpaceOffset + windNoiseOffset) * scale + dir * projCenter * 0.3;
+    vec2 anisotropicUVX = (advectedUVX + noiseSpaceOffset + windNoiseOffset) * scale + dir * projX * 0.3;
+    vec2 anisotropicUVY = (advectedUVY + noiseSpaceOffset + windNoiseOffset) * scale + dir * projY * 0.3;
+
+    vec2 advectedTimeOffset = timeOffset * timeScale - advectionVector * scale * 0.2;
+
+    float waveCenter = fbm(anisotropicUVCenter + advectedTimeOffset, 3);
+    float waveX = fbm(anisotropicUVX + advectedTimeOffset, 3);
+    float waveY = fbm(anisotropicUVY + advectedTimeOffset, 3);
+    vec2 waveGradient = vec2((waveX - waveCenter) / eps, (waveY - waveCenter) / eps);
+
+    // Compute wave-perturbed normal (preliminary estimate)
+    float waveStrength = 0.05;
+    vec3 wavePerturbedNormal =
+        surfaceNormal + tangent * waveGradient.x * waveStrength + bitangent * waveGradient.y * waveStrength;
+    wavePerturbedNormal = normalize(wavePerturbedNormal);
+
+    // Check if wave-perturbed surface is occluded from sun (dark side)
+    // If the perturbed normal faces away from sun, reduce anisotropic effect
+    float sunDotPerturbedNormal = dot(sunDirection, wavePerturbedNormal);
+    float occlusionFactor = max(0.0, sunDotPerturbedNormal);        // 0 = fully occluded, 1 = fully lit
+    occlusionFactor = smoothstep(-0.2, 0.3, sunDotPerturbedNormal); // Smooth transition at terminator
+
+    // Advection-based wave propagation:
+    // The wave state is advected (moved) in the direction of the wind-modified trajectory
+    // We sample noise at the advected location to see where the wave "came from"
+    // This creates proper wave propagation with momentum - the noise encodes the advected state
+    // Reuse the advection variables computed above for gradient computation
+
+    // Sample noise at the advected location (where the wave state came from)
+    // This represents the wave state that has been advected by the wind
+    // The noise is no longer random - it encodes the wave state that has propagated
+    vec2 advectedUV = uv + advectionVector;
+
+    // Apply anisotropic distortion based on wave direction
+    // Include wind-based noise offset for localized wave propagation effects
+    float projAdvected = dot(advectedUV * scale, dir);
+    vec2 anisotropicUVAdvected = (advectedUV + noiseSpaceOffset + windNoiseOffset) * scale + dir * projAdvected * 0.3;
+
+    // Sample the advected wave state
+    // The time offset creates animation, but we also account for advection in the noise space
+    // This ensures the wave state properly propagates and updates over time
+    // Reuse advectedTimeOffset computed above (same advection vector)
+    float waveState = fbm(anisotropicUVAdvected + advectedTimeOffset, 3);
+
+    // The wave state now represents advected noise that has been moved by wind
+    // This creates proper wave propagation in the direction of the wind-modified trajectory
+    // The noise encodes the updated/advected wave state, not random values
+
+    // Modulate by occlusion factor - reduce anisotropic effect on dark side
+    // This predicts occlusion based on wave-perturbed normal
+    return waveState * occlusionFactor;
+}
+
+// Compute a single wave layer with specific scale and time speed
+// Returns noise value proportional to the layer's scale
+// Each layer uses a distinct noise space offset to create independent flow directions
+// Trajectories are constrained to the tangent plane
+// Considers wave-perturbed normal occlusion from sun
+// Uses shared trajectory tensor with accumulated directional distortions
+float computeWaveLayer(vec2 texUV,
+                       float scale,
+                       float timeSpeed,
+                       float time,
+                       vec2 waveDir1,
+                       vec2 waveDir2,
+                       float amplitude,
+                       vec2 noiseSpaceOffset,
+                       vec3 surfaceNormal,
+                       vec3 tangent,
+                       vec3 bitangent,
+                       vec3 sunDirection,
+                       vec2 largeDistortion,
+                       vec2 mediumDistortion,
+                       vec2 smallDistortion,
+                       float largeWeight,
+                       float mediumWeight,
+                       float smallWeight)
+{
+    // Convert Julian date fraction to seconds
+    float secondsInDay = time * 86400.0;
+
+    // Time offset based on layer speed
+    vec2 timeOffset = vec2(secondsInDay * timeSpeed, secondsInDay * timeSpeed * 0.7);
+
+    // Compute wave height with advection for both directions
+    // Each direction uses the same noise space offset for consistency
+    // Trajectories are constrained to tangent plane to ensure upward flow
+    // Uses shared trajectory tensor with accumulated directional distortions
+    float wave1 = computeAnisotropicWave(texUV,
+                                         waveDir1,
+                                         scale,
+                                         timeOffset,
+                                         1.0,
+                                         time,
+                                         noiseSpaceOffset,
+                                         surfaceNormal,
+                                         tangent,
+                                         bitangent,
+                                         sunDirection,
+                                         largeDistortion,
+                                         mediumDistortion,
+                                         smallDistortion,
+                                         largeWeight,
+                                         mediumWeight,
+                                         smallWeight);
+    float wave2 = computeAnisotropicWave(texUV,
+                                         waveDir2,
+                                         scale * 1.5,
+                                         timeOffset,
+                                         0.8,
+                                         time,
+                                         noiseSpaceOffset,
+                                         surfaceNormal,
+                                         tangent,
+                                         bitangent,
+                                         sunDirection,
+                                         largeDistortion,
+                                         mediumDistortion,
+                                         smallDistortion,
+                                         largeWeight,
+                                         mediumWeight,
+                                         smallWeight);
+
+    // Combine directions and scale by amplitude (proportional to layer scale)
+    float combinedWave = (wave1 * 0.7 + wave2 * 0.3) * amplitude;
+
+    return combinedWave;
+}
+
+// Generate anisotropic wave normal perturbation for water surfaces
+// Creates subtle wave patterns that are direction-dependent (like real waves)
+// Uses three layers compounding from large to small: large (hours) -> medium (minutes) -> small (seconds)
+// Considers wave-perturbed normal occlusion from sun on dark side
+// Uses shared trajectory tensor with noise-sampled rotation factors
+vec3 computeWaveNormal(vec2 texUV, vec3 surfaceNormal, vec3 tangent, vec3 bitangent, float time, vec3 sunDirection)
+{
+    // Anisotropic wave direction (waves tend to flow in one direction)
+    // Primary wave direction (dominant wind/wave direction)
+    vec2 waveDir1 = normalize(vec2(1.0, 0.5));
+    // Secondary wave direction (cross-waves)
+    vec2 waveDir2 = normalize(vec2(0.7, 1.0));
+
+    // Base amplitude - larger waves have larger amplitude
+    float baseAmplitude = 1.0;
+
+    // Each layer uses a distinct noise space offset to create independent flow directions
+    // These offsets act as separate "image databases" for each layer
+    vec2 largeNoiseOffset = vec2(100.0, 200.0);  // Large wave noise space
+    vec2 mediumNoiseOffset = vec2(300.0, 400.0); // Medium wave noise space
+    vec2 smallNoiseOffset = vec2(500.0, 600.0);  // Small wave noise space
+
+    // Layer scales
+    float largeScale = 30.0;
+    float mediumScale = 100.0;
+    float smallScale = 200.0;
+
+    // Directional distortion weights - larger layers have more pronounced effect
+    float largeWeight = 1.0;  // Most pronounced
+    float mediumWeight = 0.6; // Moderate
+    float smallWeight = 0.3;  // Less pronounced
+
+    // Get shared base trajectory (current trajectory tensor starting point)
+    vec2 baseTrajectory = computeBaseTrajectory(texUV, time);
+
+    // Compute directional distortions for each layer
+    // Each layer samples noise to get rotation factor and rotates the base trajectory
+    // All distortions are computed relative to the base trajectory, then accumulated
+    vec2 largeDistortion = computeLayerDirectionalDistortion(texUV, largeScale, time, largeNoiseOffset, baseTrajectory);
+    vec2 mediumDistortion =
+        computeLayerDirectionalDistortion(texUV, mediumScale, time, mediumNoiseOffset, baseTrajectory);
+    vec2 smallDistortion = computeLayerDirectionalDistortion(texUV, smallScale, time, smallNoiseOffset, baseTrajectory);
+
+    // Layer 3: Large waves (wavefronts) - much larger noise, moving very slowly over hours
+    // Start with largest scale - this is the base
+    float largeSpeed = 0.0001; // Moves very slowly over hours (1/10000th speed - much slower than small waves)
+    float largeAmplitude = baseAmplitude * 0.5; // Largest amplitude
+    float combinedWave = computeWaveLayer(texUV,
+                                          largeScale,
+                                          largeSpeed,
+                                          time,
+                                          waveDir1,
+                                          waveDir2,
+                                          largeAmplitude,
+                                          largeNoiseOffset,
+                                          surfaceNormal,
+                                          tangent,
+                                          bitangent,
+                                          sunDirection,
+                                          largeDistortion,
+                                          mediumDistortion,
+                                          smallDistortion,
+                                          largeWeight,
+                                          mediumWeight,
+                                          smallWeight);
+
+    // Layer 2: Medium waves - larger scale, moving slowly over minutes
+    // Add medium waves on top of large waves (different noise space = different angle)
+    float mediumSpeed = 0.01;                    // Moves slowly over minutes (1/100th speed)
+    float mediumAmplitude = baseAmplitude * 0.3; // Medium amplitude
+    combinedWave += computeWaveLayer(texUV,
+                                     mediumScale,
+                                     mediumSpeed,
+                                     time,
+                                     waveDir1,
+                                     waveDir2,
+                                     mediumAmplitude,
+                                     mediumNoiseOffset,
+                                     surfaceNormal,
+                                     tangent,
+                                     bitangent,
+                                     sunDirection,
+                                     largeDistortion,
+                                     mediumDistortion,
+                                     smallDistortion,
+                                     largeWeight,
+                                     mediumWeight,
+                                     smallWeight);
+
+    // Layer 1: Small waves - fine detail, moving every second
+    // Add small waves on top (different noise space = different angle)
+    float smallSpeed = 0.1;                     // Moves every second (1000x faster than large waves)
+    float smallAmplitude = baseAmplitude * 0.2; // Small amplitude
+    combinedWave += computeWaveLayer(texUV,
+                                     smallScale,
+                                     smallSpeed,
+                                     time,
+                                     waveDir1,
+                                     waveDir2,
+                                     smallAmplitude,
+                                     smallNoiseOffset,
+                                     surfaceNormal,
+                                     tangent,
+                                     bitangent,
+                                     sunDirection,
+                                     largeDistortion,
+                                     mediumDistortion,
+                                     smallDistortion,
+                                     largeWeight,
+                                     mediumWeight,
+                                     smallWeight);
+
+    // Layer 0: Shoreline waves - very small waves that repeatedly approach shorelines
+    // These create the characteristic "lapping" effect near coasts
+    float shorelineWaveScale = smallScale * 3.0;         // Even smaller waves (higher scale = smaller waves)
+    float shorelineWaveAmplitude = baseAmplitude * 0.15; // Moderate amplitude for visibility
+
+    // Compute shoreline proximity and direction
+    float sdf = computeShorelineSDF(texUV);
+    float shorelineProximity = 1.0 - smoothstep(0.0, 0.08, max(0.0, sdf)); // Fade out beyond 0.08 UV units
+
+    // Only add shoreline waves if we're in the ocean and near a shoreline
+    if (sdf > 0.0 && shorelineProximity > 0.01)
+    {
+        // Get direction toward shoreline (from ocean toward land)
+        vec2 shorelineNormal = computeShorelineNormal(texUV);
+        float normalLen = length(shorelineNormal);
+
+        if (normalLen > 0.01)
+        {
+            // Normalize shoreline normal (points from land toward ocean, so negate for toward-shore direction)
+            vec2 towardShore = -normalize(shorelineNormal);
+
+            // Create oscillating approach pattern using time-based sine wave
+            // Waves approach the shore, then recede, creating repeated lapping effect
+            float secondsInDay = time * 86400.0;
+            float approachFrequency = 0.5; // Frequency of approach/recede cycles (cycles per second)
+            float approachPhase = sin(secondsInDay * approachFrequency * 2.0 * PI);
+
+            // Create asymmetric pattern: strong approach, weak recede
+            // Use absolute value with stronger positive phase for realistic lapping
+            float approachStrength = (0.7 + 0.3 * approachPhase) * shorelineProximity;
+            // Clamp to ensure waves always have some movement toward shore
+            approachStrength = max(0.3, approachStrength);
+
+            // Create time offset that moves toward the shore
+            vec2 shorelineTimeOffset =
+                vec2(secondsInDay * 0.2 * approachStrength, secondsInDay * 0.2 * approachStrength * 0.7);
+
+            // Sample noise with shoreline-specific offset
+            vec2 shorelineNoiseOffset = vec2(0.3, 0.7); // Different noise space for shoreline waves
+            vec2 shorelineUV = (texUV + shorelineNoiseOffset) * shorelineWaveScale;
+
+            // Add directional component toward shore for wave pattern
+            float projTowardShore = dot(shorelineUV, towardShore);
+            vec2 anisotropicShorelineUV = shorelineUV + towardShore * projTowardShore * 0.5;
+
+            // Sample wave pattern
+            float shorelineWave = fbm(anisotropicShorelineUV + shorelineTimeOffset, 3);
+
+            // Scale by approach strength and proximity
+            float shorelineWaveHeight = shorelineWave * approachStrength * shorelineWaveAmplitude;
+
+            // Add to combined wave
+            combinedWave += shorelineWaveHeight;
+        }
+    }
+
+    // Calculate wave gradients using finite differences
+    // Sample neighboring points to compute gradient efficiently
+    float eps = 0.001; // Small offset for gradient calculation
+
+    // Compute gradients for each layer additively (compound from large to small)
+    // Each layer samples from its own noise space, creating distinct angles
+    float waveX = 0.0;
+    float waveY = 0.0;
+
+    // Large layer gradient (distinct noise space, constrained to tangent plane)
+    float largeX = computeWaveLayer(texUV + vec2(eps, 0.0),
+                                    largeScale,
+                                    largeSpeed,
+                                    time,
+                                    waveDir1,
+                                    waveDir2,
+                                    largeAmplitude,
+                                    largeNoiseOffset,
+                                    surfaceNormal,
+                                    tangent,
+                                    bitangent,
+                                    sunDirection,
+                                    largeDistortion,
+                                    mediumDistortion,
+                                    smallDistortion,
+                                    largeWeight,
+                                    mediumWeight,
+                                    smallWeight);
+    float largeY = computeWaveLayer(texUV + vec2(0.0, eps),
+                                    largeScale,
+                                    largeSpeed,
+                                    time,
+                                    waveDir1,
+                                    waveDir2,
+                                    largeAmplitude,
+                                    largeNoiseOffset,
+                                    surfaceNormal,
+                                    tangent,
+                                    bitangent,
+                                    sunDirection,
+                                    largeDistortion,
+                                    mediumDistortion,
+                                    smallDistortion,
+                                    largeWeight,
+                                    mediumWeight,
+                                    smallWeight);
+    waveX += largeX;
+    waveY += largeY;
+
+    // Medium layer gradient (additive, distinct noise space = different angle, constrained to tangent plane)
+    float mediumX = computeWaveLayer(texUV + vec2(eps, 0.0),
+                                     mediumScale,
+                                     mediumSpeed,
+                                     time,
+                                     waveDir1,
+                                     waveDir2,
+                                     mediumAmplitude,
+                                     mediumNoiseOffset,
+                                     surfaceNormal,
+                                     tangent,
+                                     bitangent,
+                                     sunDirection,
+                                     largeDistortion,
+                                     mediumDistortion,
+                                     smallDistortion,
+                                     largeWeight,
+                                     mediumWeight,
+                                     smallWeight);
+    float mediumY = computeWaveLayer(texUV + vec2(0.0, eps),
+                                     mediumScale,
+                                     mediumSpeed,
+                                     time,
+                                     waveDir1,
+                                     waveDir2,
+                                     mediumAmplitude,
+                                     mediumNoiseOffset,
+                                     surfaceNormal,
+                                     tangent,
+                                     bitangent,
+                                     sunDirection,
+                                     largeDistortion,
+                                     mediumDistortion,
+                                     smallDistortion,
+                                     largeWeight,
+                                     mediumWeight,
+                                     smallWeight);
+    waveX += mediumX;
+    waveY += mediumY;
+
+    // Small layer gradient (additive, distinct noise space = different angle, constrained to tangent plane)
+    float smallX = computeWaveLayer(texUV + vec2(eps, 0.0),
+                                    smallScale,
+                                    smallSpeed,
+                                    time,
+                                    waveDir1,
+                                    waveDir2,
+                                    smallAmplitude,
+                                    smallNoiseOffset,
+                                    surfaceNormal,
+                                    tangent,
+                                    bitangent,
+                                    sunDirection,
+                                    largeDistortion,
+                                    mediumDistortion,
+                                    smallDistortion,
+                                    largeWeight,
+                                    mediumWeight,
+                                    smallWeight);
+    float smallY = computeWaveLayer(texUV + vec2(0.0, eps),
+                                    smallScale,
+                                    smallSpeed,
+                                    time,
+                                    waveDir1,
+                                    waveDir2,
+                                    smallAmplitude,
+                                    smallNoiseOffset,
+                                    surfaceNormal,
+                                    tangent,
+                                    bitangent,
+                                    sunDirection,
+                                    largeDistortion,
+                                    mediumDistortion,
+                                    smallDistortion,
+                                    largeWeight,
+                                    mediumWeight,
+                                    smallWeight);
+    waveX += smallX;
+    waveY += smallY;
+
+    // Compute gradient (finite difference approximation)
+    // This uses the exact same noise values that created combinedWave
+    vec2 gradient = vec2((waveX - combinedWave) / eps, (waveY - combinedWave) / eps);
+
+    // Overall wave strength - subtle effect
+    float waveStrength = 0.08;
+
+    // Perturb normal using gradient from the exact same noise
+    // The gradient tells us which direction the surface slopes
+    // Using the same noise ensures the normal matches the wave shape exactly, creating depth
+    // The final anisotropic angle is produced by compounding all layers from large to small
+    vec3 waveNormal = surfaceNormal + tangent * gradient.x * waveStrength + bitangent * gradient.y * waveStrength;
+
+    return normalize(waveNormal);
+}
+
+
+// Legacy function for compatibility
 float getAtmosphericPathMultiplier(float NdotL)
 {
+    // Simple approximation for backward compatibility
     float cosAngle = max(NdotL, 0.01);
     float pathLength = min(1.0 / cosAngle, 40.0);
     return exp(-0.05 * (pathLength - 1.0));
@@ -278,50 +1303,6 @@ float getWaterPathMultiplier(float NdotL, float depthMeters)
     return depthMeters / max(cosWater, 0.3);
 }
 
-// Ray-Marched Subsurface Scattering Through Water Column
-// Scientific absorption coefficients for pure seawater (per meter)
-// Reference: Pope & Fry (1997) "Absorption spectrum (380-700 nm) of pure water"
-// Typical values for clear ocean water:
-// Red (680nm): ~0.4-0.5 m^-1 (strongly absorbed)
-// Green (550nm): ~0.02-0.05 m^-1 (weakly absorbed)
-// Blue (440nm): ~0.01-0.02 m^-1 (weakly absorbed)
-const vec3 WATER_ABSORPTION = vec3(0.45,   // Red (680nm): strongly absorbed
-                                   0.03,   // Green (550nm): weakly absorbed
-                                   0.015); // Blue (440nm): weakly absorbed
-// Scattering coefficient - minimal, let texture colors show through
-const vec3 WATER_SCATTERING = vec3(0.0003, 0.0005, 0.0008);
-// Index of refraction for seawater (slightly higher than pure water due to salinity)
-// Pure water at 20°C: 1.333, Seawater (35‰ salinity): ~1.339
-const float WATER_IOR = 1.339; // Seawater index of refraction
-
-// Consistent ocean floor color (sand/sediment) for refraction calculations
-// Typical ocean floor sediment colors: light beige/tan to brown
-const vec3 OCEAN_FLOOR_COLOR = vec3(0.75, 0.70, 0.65); // Light beige/tan sediment color
-
-// Refract a ray at water surface using Snell's law
-vec3 refractRay(vec3 incident, vec3 normal, float eta)
-{
-    float cosI = -dot(normal, incident);
-    float sinT2 = eta * eta * (1.0 - cosI * cosI);
-
-    if (sinT2 > 1.0)
-    {
-        // Total internal reflection
-        return reflect(incident, normal);
-    }
-
-    float cosT = sqrt(1.0 - sinT2);
-    return eta * incident + (eta * cosI - cosT) * normal;
-}
-
-// Sample bathymetry at a UV offset (for ray marching)
-float sampleBathymetry(vec2 baseUV, vec2 offset)
-{
-    vec2 sampleUV = baseUV + offset;
-    // Clamp to valid range
-    sampleUV = clamp(sampleUV, vec2(0.001), vec2(0.999));
-    return texture2D(uBathymetryDepth, sampleUV).r * 11000.0;
-}
 
 // Compute combined normal map from landmass (heightmap + normal) and ocean (bathymetry normal)
 // This creates a global normal map that includes both land and ocean features
@@ -368,629 +1349,6 @@ vec3 computeCombinedNormalMap(vec2 texUV, vec3 surfaceNormal, vec3 tangent, vec3
     return combinedNormal;
 }
 
-// Water scattering: Ray-march from camera into water, sampling LUTs at each step
-// Uses precomputed LUT for fast lookup based on depth, sun angle, view angle, and relative angle
-// Accumulates scattering contribution as ray travels through water, using depth/elevation
-// and normal vectors at each point to determine trajectory and refraction
-vec3 submarineScattering(vec2 texUV,         // Base texture UV
-                         float surfaceDepth, // Depth at this pixel (meters)
-                         vec3 viewDir,       // View direction (from surface to camera)
-                         vec3 lightDir,      // Sun direction
-                         vec3 lightColor,    // Actual sun color
-                         vec3 surfaceNormal, // Water surface normal at starting point
-                         float NdotL,        // Surface illumination
-                         vec3 worldPos,      // Starting world position on sphere surface
-                         float time,
-                         vec3 tangent,      // Tangent vector (east) at starting point
-                         vec3 bitangent,    // Bitangent vector (north) at starting point
-                         vec3 surfaceColor) // Surface color (sky reflection) - unused, kept for compatibility
-{
-    // Use LUT-based ray-marching if available
-    if (uUseWaterScatteringLUT == 1)
-    {
-        // Ray-march from camera into water, sampling LUTs progressively at each step
-        // Uses depth/elevation and normal vectors at each point to determine trajectory
-        // Applies color based on refraction indices at each point
-        const float UV_STEP_SCALE = 0.002;
-        const float STEP_DISTANCE_METERS = 20.0; // meters per step
-        const int MAX_REFRACTION_STEPS = 100;
-
-        // CRITICAL: Refract view ray from camera into water at surface (air -> water)
-        // viewDir is from surface to camera, so -viewDir is from camera to surface
-        // Refract from air (IOR=1.0) to water (IOR=WATER_IOR)
-        vec3 cameraToSurface = -viewDir; // Direction from camera to surface
-        vec3 currentRay = refractRay(cameraToSurface, surfaceNormal, 1.0 / WATER_IOR);
-        vec2 currentUV = texUV;
-
-        // Track current sphere normal (will be updated as we move along sphere)
-        vec3 currentNormal = surfaceNormal;
-        vec3 currentTangent = tangent;
-        vec3 currentBitangent = bitangent;
-
-        // Accumulated scattering contribution
-        vec3 accumulatedScattering = vec3(0.0);
-        float totalPathLength = 0.0; // Total distance traveled through water
-
-        // Previous depth for incremental scattering computation
-        float prevDepth = 0.0;
-        vec3 prevScattering = vec3(0.0);
-
-        // Ray-march from camera through water
-        for (int step = 0; step < MAX_REFRACTION_STEPS; step++)
-        {
-            vec2 sampleUV = clamp(currentUV, vec2(0.001), vec2(0.999));
-
-            // Check if we've hit land
-            float landMaskAtStep = texture2DLod(uLandmassMask, sampleUV, 0.0).r;
-            if (landMaskAtStep > 0.01)
-            {
-                break; // Hit land, terminate
-            }
-
-            // Sample depth at current position
-            float currentDepth = texture2DLod(uBathymetryDepth, sampleUV, 0.0).r * MAX_DEPTH;
-
-            // Compute sphere normal at current UV position (needed for floor check and scattering)
-            // This must be computed before floor check since floor calculations need localNormal
-            float v_sinu = sampleUV.y;
-            float lat = (v_sinu - 0.5) * PI;
-            float cosLat = cos(lat);
-            float u_sinu = sampleUV.x;
-            float uMin = 0.5 - 0.5 * abs(cosLat);
-            float uMax = 0.5 + 0.5 * abs(cosLat);
-            float u_clamped = clamp(u_sinu, uMin, uMax);
-            float x_sinu = (u_clamped - 0.5) * 2.0 * PI;
-            float lon = x_sinu / max(abs(cosLat), 0.01);
-
-            float cosLon = cos(lon);
-            float sinLon = sin(lon);
-            float cosLat_safe = cos(lat);
-            float sinLat = sin(lat);
-            vec3 sphereNormalAtUV = vec3(cosLat_safe * cosLon, sinLat, cosLat_safe * sinLon);
-
-            currentNormal = sphereNormalAtUV;
-
-            // Recompute tangent frame
-            currentTangent = cross(uPoleDir, currentNormal);
-            float currentTangentLen = length(currentTangent);
-            if (currentTangentLen < 0.001)
-            {
-                currentTangent = vec3(1.0, 0.0, 0.0);
-            }
-            else
-            {
-                currentTangent = currentTangent / currentTangentLen;
-            }
-            currentBitangent = cross(currentNormal, currentTangent);
-
-            // Get local normal from bathymetry (for refraction and floor calculations)
-            vec3 localNormal = currentNormal;
-            if (uUseNormalMap == 1)
-            {
-                vec4 normalSample = texture2DLod(uBathymetryNormal, sampleUV, 0.0);
-                vec3 bathymetryNormalTangent = decodeSwappedNormalMap(normalSample, sampleUV);
-                bathymetryNormalTangent.y = -bathymetryNormalTangent.y;
-                mat3 TBN = mat3(currentTangent, currentBitangent, currentNormal);
-                localNormal = normalize(TBN * bathymetryNormalTangent);
-            }
-
-            // Check if we've reached the ocean floor (now that localNormal is computed)
-            if (totalPathLength >= currentDepth && currentDepth > 1.0)
-            {
-                // Hit ocean floor - use floor color with multiscattering
-                vec3 floorColor = OCEAN_FLOOR_COLOR;
-
-                // Compute angles for floor scattering
-                float mu_sun_floor = dot(normalize(lightDir), localNormal);
-                float mu_view_floor = dot(normalize(-currentRay), localNormal);
-                vec3 viewDirNormalized = normalize(-currentRay);
-                vec3 sunDirNormalized = normalize(lightDir);
-
-                // Check if camera ray reflects directly to sun from floor
-                vec3 reflectedViewDir = reflect(-viewDirNormalized, localNormal);
-                float reflectDotSun = dot(normalize(reflectedViewDir), sunDirNormalized);
-                bool reflectsToSun = reflectDotSun > 0.866; // Within 30° of sun
-
-                // Sample transmittance to floor (camera -> floor path)
-                vec3 transmittanceToFloor = lookupWaterTransmittanceLUT(currentDepth, mu_view_floor);
-
-                vec3 floorContribution;
-
-                if (reflectsToSun)
-                {
-                    // Camera ray reflects directly to sun from floor - use single scatter LUT
-                    float nu_floor = dot(viewDirNormalized, sunDirNormalized);
-                    nu_floor = clamp(nu_floor, -1.0, 1.0);
-
-                    vec3 floorScatteringLUT =
-                        lookupWaterScatteringLUT(currentDepth, mu_sun_floor, mu_view_floor, nu_floor);
-                    floorContribution = lightColor * floorScatteringLUT * transmittanceToFloor;
-                }
-                else
-                {
-                    // Camera ray scatters off floor - use floor color with multiscattering
-                    // Multiscattering accounts for how floor reflects light toward sun
-                    vec3 multiscatter = lookupWaterMultiscatterLUT(currentDepth, mu_sun_floor);
-                    floorContribution = floorColor * lightColor * multiscatter * transmittanceToFloor;
-                }
-
-                accumulatedScattering += floorContribution;
-
-                break; // Hit floor, terminate
-            }
-
-            // Compute angles for LUT lookup at this step
-            float mu_sun = dot(normalize(lightDir), localNormal);
-            float mu_view = dot(normalize(-currentRay), localNormal);
-            vec3 viewDirNormalized = normalize(-currentRay);
-            vec3 sunDirNormalized = normalize(lightDir);
-            float nu = dot(viewDirNormalized, sunDirNormalized);
-            nu = clamp(nu, -1.0, 1.0);
-
-            // Check if camera ray reflects directly toward the sun
-            // Compute reflection direction of view ray
-            vec3 reflectedViewDir = reflect(-viewDirNormalized, localNormal);
-            float reflectDotSun = dot(normalize(reflectedViewDir), sunDirNormalized);
-
-            // Threshold for "direct reflection" - when reflection points toward sun
-            // Use tight threshold: only when reflection is within ~30° of sun (cos(30°) ≈ 0.866)
-            bool reflectsToSun = reflectDotSun > 0.866;
-
-            // Sample transmittance LUT at current depth and view angle
-            // This gives us absorption along the path
-            vec3 transmittance = lookupWaterTransmittanceLUT(totalPathLength, mu_view);
-
-            vec3 stepContribution;
-
-            if (reflectsToSun)
-            {
-                // Camera ray reflects directly to sun - use LUT scattering color
-                // Sample single scatter LUT at current depth
-                vec3 currentScattering = lookupWaterScatteringLUT(totalPathLength, mu_sun, mu_view, nu);
-
-                // Compute incremental scattering contribution
-                // Difference between current and previous scattering gives incremental contribution
-                vec3 incrementalScattering = currentScattering - prevScattering;
-
-                // Apply transmittance (absorption) to incremental scattering
-                // This accounts for light that survives to reach this depth
-                stepContribution = lightColor * incrementalScattering * transmittance;
-
-                // Update for next iteration (only when using scattering LUT)
-                prevScattering = currentScattering;
-            }
-            else
-            {
-                // Camera ray scatters off - use ocean floor color with multiscattering
-                // Multiscattering accounts for how light reflects from floor toward sun
-
-                // Sample ocean floor color at this depth
-                vec3 floorColor = OCEAN_FLOOR_COLOR;
-
-                // Sample multiscatter LUT for sun angle (floor -> sun path)
-                // mu_sun represents the angle from floor normal toward sun
-                vec3 multiscatter = lookupWaterMultiscatterLUT(totalPathLength, mu_sun);
-
-                // Floor color with multiscattering: floor color modulated by multiscatter and transmittance
-                // Multiscatter accounts for how the floor reflects light toward the sun
-                stepContribution = floorColor * lightColor * multiscatter * transmittance;
-
-                // Reset prevScattering when switching to floor color mode
-                // This ensures next iteration starts fresh if it switches back to scattering
-                prevScattering = vec3(0.0);
-            }
-
-            accumulatedScattering += stepContribution;
-
-            // Update for next iteration
-            prevDepth = totalPathLength;
-            totalPathLength += STEP_DISTANCE_METERS;
-
-            // Check if ray is exiting water (water -> air refraction at surface)
-            // If path length is very small and we're near surface, ray might exit
-            if (totalPathLength < 10.0 && currentDepth < 10.0)
-            {
-                // Ray is near surface - check if it would exit
-                // If ray direction points upward relative to surface normal, it exits
-                float exitDot = dot(normalize(currentRay), localNormal);
-                if (exitDot > 0.0)
-                {
-                    // Ray is exiting water - refract from water to air
-                    vec3 exitRay = refractRay(-normalize(currentRay), localNormal, WATER_IOR / 1.0);
-
-                    // If refraction fails (total internal reflection), use reflection
-                    if (length(exitRay) < 0.001)
-                    {
-                        exitRay = reflect(-normalize(currentRay), localNormal);
-                    }
-
-                    // Apply transmittance for exit path
-                    float mu_exit = dot(normalize(exitRay), localNormal);
-                    vec3 transmittanceExit = lookupWaterTransmittanceLUT(totalPathLength, mu_exit);
-
-                    // Modulate accumulated scattering by exit transmittance
-                    accumulatedScattering *= transmittanceExit;
-
-                    break; // Ray exits water, terminate
-                }
-            }
-
-            // Refract ray at this position using local normal and refraction index
-            // This determines trajectory for next step based on refraction at this point
-            // Inside water: continue refracting with water IOR
-            currentRay = refractRay(-normalize(currentRay), localNormal, 1.0 / WATER_IOR);
-
-            // Update UV based on refracted ray direction
-            float rayTangent = dot(currentRay, currentTangent);
-            float rayBitangent = dot(currentRay, currentBitangent);
-            vec2 uvOffset = vec2(rayTangent, rayBitangent) * UV_STEP_SCALE / max(abs(cosLat), 0.01);
-            currentUV = clamp(currentUV + uvOffset, vec2(0.001), vec2(0.999));
-        }
-
-        // Return accumulated scattering from ray-marching
-        return accumulatedScattering;
-    }
-
-    // Fallback to ray-marching if LUT not available
-    // CRITICAL: Estimate planet radius from starting position
-    const float WGS84_MEAN_RADIUS_M = (2.0 * 6378137.0 + 6356752.314245) / 3.0;
-    float planetRadiusEstimate = length(worldPos);
-    float scale = WGS84_MEAN_RADIUS_M / planetRadiusEstimate; // Meters per display unit
-
-    // Refract view ray into water (Snell's law)
-    vec3 currentRay = refractRay(-viewDir, surfaceNormal, 1.0 / WATER_IOR);
-    vec2 currentUV = texUV;
-
-    // Track current sphere normal (will be updated as we move along sphere)
-    vec3 currentNormal = surfaceNormal;
-    vec3 currentTangent = tangent;
-    vec3 currentBitangent = bitangent;
-
-    // Accumulated color transforms (absorption coefficients accumulated along path)
-    // Start with no absorption (vec3(1.0) = no change)
-    vec3 accumulatedAbsorption = vec3(1.0);
-    float totalPathLength = 0.0; // Total distance traveled through water
-
-    // Step size for moving along refracted ray in UV space
-    const float UV_STEP_SCALE = 0.002;
-    const float STEP_DISTANCE_METERS = 20.0; // meters per step
-
-    // Maximum steps to prevent infinite loops (but no depth thresholding)
-    const int MAX_REFRACTION_STEPS = 100;
-
-    bool hitOceanFloor = false;
-    vec2 floorUV = vec2(0.0);
-    vec3 floorNormal = vec3(0.0);
-    float floorDepth = 0.0;
-
-    // Phase 1: Ray-march from camera through water until we hit ocean floor or exit
-    for (int step = 0; step < MAX_REFRACTION_STEPS; step++)
-    {
-        vec2 sampleUV = clamp(currentUV, vec2(0.001), vec2(0.999));
-
-        // Check if we've hit land (stop if we hit land)
-        float landMaskAtStep = texture2DLod(uLandmassMask, sampleUV, 0.0).r;
-        if (landMaskAtStep > 0.01)
-        {
-            break; // Hit land, terminate
-        }
-
-        // Sample depth at current position (always from heightmap)
-        // Depth is always used for absorption and floor detection
-        float currentDepth = texture2DLod(uBathymetryDepth, sampleUV, 0.0).r * 11000.0;
-
-        // Compute sphere normal at current UV position
-        float v_sinu = sampleUV.y;
-        float lat = (v_sinu - 0.5) * PI;
-        float cosLat = cos(lat);
-        float u_sinu = sampleUV.x;
-        float uMin = 0.5 - 0.5 * abs(cosLat);
-        float uMax = 0.5 + 0.5 * abs(cosLat);
-        float u_clamped = clamp(u_sinu, uMin, uMax);
-        float x_sinu = (u_clamped - 0.5) * 2.0 * PI;
-        float lon = x_sinu / max(abs(cosLat), 0.01);
-
-        float cosLon = cos(lon);
-        float sinLon = sin(lon);
-        float cosLat_safe = cos(lat);
-        float sinLat = sin(lat);
-        vec3 sphereNormalAtUV = vec3(cosLat_safe * cosLon, sinLat, cosLat_safe * sinLon);
-
-        currentNormal = sphereNormalAtUV;
-
-        // Recompute tangent frame
-        currentTangent = cross(uPoleDir, currentNormal);
-        float currentTangentLen = length(currentTangent);
-        if (currentTangentLen < 0.001)
-        {
-            currentTangent = vec3(1.0, 0.0, 0.0);
-        }
-        else
-        {
-            currentTangent = currentTangent / currentTangentLen;
-        }
-        currentBitangent = cross(currentNormal, currentTangent);
-
-        // Get local normal from bathymetry
-        vec3 localNormal = currentNormal;
-        if (uUseNormalMap == 1)
-        {
-            vec4 normalSample = texture2DLod(uBathymetryNormal, sampleUV, 0.0);
-            vec3 bathymetryNormalTangent = decodeSwappedNormalMap(normalSample, sampleUV);
-            bathymetryNormalTangent.y = -bathymetryNormalTangent.y;
-            mat3 TBN = mat3(currentTangent, currentBitangent, currentNormal);
-            localNormal = normalize(TBN * bathymetryNormalTangent);
-        }
-
-        // Check if we've reached the ocean floor
-        // Use a small threshold to detect floor contact
-        // Depth is always used regardless of heightmap toggle
-        float depthDifference = abs(currentDepth - totalPathLength);
-        if (depthDifference < STEP_DISTANCE_METERS * 2.0 && currentDepth > 1.0)
-        {
-            // Hit ocean floor - store position and continue ray-marching toward sun
-            hitOceanFloor = true;
-            floorUV = sampleUV;
-            floorNormal = localNormal;
-            floorDepth = currentDepth;
-            break;
-        }
-
-        // Accumulate absorption along path (Beer-Lambert law)
-        // Apply absorption for this step's distance
-        vec3 stepAbsorption = exp(-WATER_ABSORPTION * STEP_DISTANCE_METERS);
-        accumulatedAbsorption *= stepAbsorption;
-        totalPathLength += STEP_DISTANCE_METERS;
-
-        // Refract ray at this position
-        currentRay = refractRay(-normalize(currentRay), localNormal, 1.0 / WATER_IOR);
-
-        // Update UV based on refracted ray direction
-        float rayTangent = dot(currentRay, currentTangent);
-        float rayBitangent = dot(currentRay, currentBitangent);
-        vec2 uvOffset = vec2(rayTangent, rayBitangent) * UV_STEP_SCALE / max(abs(cosLat), 0.01);
-        currentUV = clamp(currentUV + uvOffset, vec2(0.001), vec2(0.999));
-    }
-
-    // Subsurface scattering contribution from sunlight
-    // Start with sunlight and apply view path absorption (camera -> surface)
-    vec3 subsurfaceScattering = lightColor * accumulatedAbsorption;
-
-    // Phase 2: If we hit ocean floor, add floor contribution
-    // The floor color adds to subsurface scattering when light reaches the floor
-    if (hitOceanFloor)
-    {
-        // Compute surface normal for sun path (modulated by normal map if enabled)
-        vec3 surfaceNormalForSun = surfaceNormal;
-        if (uUseNormalMap == 1)
-        {
-            vec3 waveNormal = getOceanWaveNormal(texUV, surfaceNormal, tangent, bitangent, time);
-            surfaceNormalForSun = waveNormal;
-        }
-
-        // Refract sun ray into water at surface (Snell's law)
-        vec3 sunRayInWater = refractRay(-normalize(lightDir), surfaceNormalForSun, 1.0 / WATER_IOR);
-
-        // Ray-march from floor toward sun, continuing to scatter
-        // Start from floor position and march toward sun direction
-        vec2 currentFloorUV = floorUV;
-        vec3 currentFloorNormal = floorNormal;
-        float pathFromFloor = 0.0;
-        vec3 absorptionFromFloor = vec3(1.0);
-
-        // Direction from floor toward sun (refracted sun ray direction)
-        vec3 rayFromFloor = normalize(sunRayInWater);
-
-        // Continue ray-marching from floor, scattering toward sun
-        // This captures bounces from both edges and flat bottoms
-        for (int floorStep = 0; floorStep < MAX_REFRACTION_STEPS; floorStep++)
-        {
-            vec2 sampleUV = clamp(currentFloorUV, vec2(0.001), vec2(0.999));
-
-            // Check if we've hit land
-            float landMask = texture2DLod(uLandmassMask, sampleUV, 0.0).r;
-            if (landMask > 0.01)
-            {
-                break;
-            }
-
-            // Sample depth at current position
-            float currentDepth = texture2DLod(uBathymetryDepth, sampleUV, 0.0).r * 11000.0;
-
-            // Compute sphere normal at current position
-            float v_sinu = sampleUV.y;
-            float lat = (v_sinu - 0.5) * PI;
-            float cosLat = cos(lat);
-            float u_sinu = sampleUV.x;
-            float uMin = 0.5 - 0.5 * abs(cosLat);
-            float uMax = 0.5 + 0.5 * abs(cosLat);
-            float u_clamped = clamp(u_sinu, uMin, uMax);
-            float x_sinu = (u_clamped - 0.5) * 2.0 * PI;
-            float lon = x_sinu / max(abs(cosLat), 0.01);
-
-            float cosLon = cos(lon);
-            float sinLon = sin(lon);
-            float cosLat_safe = cos(lat);
-            float sinLat = sin(lat);
-            vec3 sphereNormal = vec3(cosLat_safe * cosLon, sinLat, cosLat_safe * sinLon);
-
-            // Update tangent frame
-            vec3 floorTangent = cross(uPoleDir, sphereNormal);
-            float floorTangentLen = length(floorTangent);
-            if (floorTangentLen < 0.001)
-            {
-                floorTangent = vec3(1.0, 0.0, 0.0);
-            }
-            else
-            {
-                floorTangent = floorTangent / floorTangentLen;
-            }
-            vec3 floorBitangent = cross(sphereNormal, floorTangent);
-
-            // Get local normal from bathymetry (for flat bottoms and edges)
-            vec3 localFloorNormal = sphereNormal;
-            if (uUseNormalMap == 1)
-            {
-                vec4 normalSample = texture2DLod(uBathymetryNormal, sampleUV, 0.0);
-                vec3 bathymetryNormalTangent = decodeSwappedNormalMap(normalSample, sampleUV);
-                bathymetryNormalTangent.y = -bathymetryNormalTangent.y;
-                mat3 TBN = mat3(floorTangent, floorBitangent, sphereNormal);
-                localFloorNormal = normalize(TBN * bathymetryNormalTangent);
-            }
-
-            // Accumulate absorption along path from floor toward sun
-            vec3 stepAbsorption = exp(-WATER_ABSORPTION * STEP_DISTANCE_METERS);
-            absorptionFromFloor *= stepAbsorption;
-            pathFromFloor += STEP_DISTANCE_METERS;
-
-            // Check if we've reached surface (path length >= floor depth)
-            // Account for sun angle: path is longer when sun is low
-            float sunRayDotNormal = dot(normalize(sunRayInWater), surfaceNormalForSun);
-            float sunPathLengthToFloor = floorDepth / max(abs(sunRayDotNormal), 0.1);
-
-            if (pathFromFloor >= sunPathLengthToFloor)
-            {
-                break; // Reached surface
-            }
-
-            // Bounce/scatter ray off floor surface
-            // Use reflection for floor bounce (light reflects off ocean floor)
-            // This captures bounces from both edges and flat bottoms
-            rayFromFloor = reflect(-normalize(rayFromFloor), localFloorNormal);
-
-            // Add some scattering (slight random perturbation for diffuse reflection)
-            // This helps capture bounces from flat bottoms, not just specular edges
-            // Use a small random offset based on position to simulate diffuse scattering
-            float scatterAmount = 0.1; // Small scattering angle
-            vec3 scatterDir = normalize(cross(localFloorNormal, vec3(1.0, 0.0, 0.0)));
-            if (abs(dot(scatterDir, localFloorNormal)) > 0.9)
-            {
-                scatterDir = normalize(cross(localFloorNormal, vec3(0.0, 1.0, 0.0)));
-            }
-            vec3 scatterOffset =
-                scatterDir * scatterAmount * (fract(sin(dot(sampleUV, vec2(12.9898, 78.233))) * 43758.5453) - 0.5);
-            rayFromFloor = normalize(rayFromFloor + scatterOffset);
-
-            // Update UV along refracted ray
-            float rayTangent = dot(rayFromFloor, floorTangent);
-            float rayBitangent = dot(rayFromFloor, floorBitangent);
-            vec2 uvOffset = vec2(rayTangent, rayBitangent) * UV_STEP_SCALE / max(abs(cosLat), 0.01);
-            currentFloorUV = clamp(currentFloorUV + uvOffset, vec2(0.001), vec2(0.999));
-        }
-
-        // Compute absorption for sun's path to floor
-        float sunRayDotSurfaceNormal = dot(normalize(sunRayInWater), surfaceNormalForSun);
-        float sunPathLengthToFloor = floorDepth / max(abs(sunRayDotSurfaceNormal), 0.1);
-        vec3 absorptionSunToFloor = exp(-WATER_ABSORPTION * sunPathLengthToFloor);
-
-        // Total absorption: sun -> floor -> surface (scattering path)
-        vec3 totalAbsorption = absorptionSunToFloor * absorptionFromFloor;
-
-        // Floor color contribution (only when light reaches floor)
-        vec3 floorColor = OCEAN_FLOOR_COLOR;
-        vec3 floorScattering = floorColor * lightColor * totalAbsorption * accumulatedAbsorption;
-
-        // Blend floor contribution with subsurface scattering
-        // More floor contribution when light actually reaches the floor
-        // The absorption determines how much floor color contributes
-        float floorBlendFactor = 1.0 - dot(totalAbsorption, vec3(0.333)); // Average absorption
-        floorBlendFactor = smoothstep(0.3, 0.9, floorBlendFactor);        // Smooth transition
-
-        subsurfaceScattering =
-            mix(subsurfaceScattering, floorScattering, floorBlendFactor * 0.5); // Max 50% floor contribution
-    }
-
-    // Return subsurface scattering contribution directly
-    // Surface reflection (Fresnel) removed - scattering handles all color contribution
-    return subsurfaceScattering;
-}
-
-// =========================================================================
-// Ocean Rendering with Ray-Marched Subsurface Scattering
-// =========================================================================
-
-vec3 calculateOceanColor(vec2 texUV,         // Texture UV for bathymetry sampling
-                         float depthMeters,  // Actual bathymetry depth in meters
-                         vec3 surfaceNormal, // Sphere normal (base water surface)
-                         vec3 worldPos,      // World position for noise sampling
-                         vec3 viewDir,       // Camera direction (from surface to camera)
-                         vec3 lightDir,      // Sun direction
-                         vec3 lightColor,    // Actual sunlight color from uLightColor
-                         float NdotL,        // Surface lit by sun
-                         vec3 tangent,       // Tangent vector (east)
-                         vec3 bitangent,     // Bitangent vector (north)
-                         float time          // For animated waves
-)
-{
-    // Wave-Perturbed Normal (now uses texture UV for correct sphere curvature mapping)
-    vec3 waveNormal = getOceanWaveNormal(texUV, surfaceNormal, tangent, bitangent, time);
-    float waveNdotL = max(dot(waveNormal, lightDir), 0.0);
-
-    // Compute surface color (sky reflection) - used when looking away from sun
-    // Sky color comes from atmosphere scattering
-    vec3 cameraToSurface = -viewDir; // Direction from camera to surface
-    vec3 reflectDir = reflect(cameraToSurface, waveNormal);
-    float skyGradient = reflectDir.y * 0.5 + 0.5;
-
-    // Sky is sunlight scattered by atmosphere (blue shift)
-    vec3 sunDirection = normalize(lightDir);
-    float reflectDotSun = dot(normalize(reflectDir), sunDirection);
-    reflectDotSun = max(0.0, reflectDotSun);
-    float chromaticFactor = smoothstep(0.0, 1.0, reflectDotSun);
-
-    float lightIntensity = max(max(lightColor.r, lightColor.g), lightColor.b);
-    vec3 neutralLight = vec3(lightIntensity);
-    vec3 chromaticLight = lightColor;
-    vec3 effectiveLight = mix(neutralLight, chromaticLight, chromaticFactor);
-
-    vec3 rayleighSky = effectiveLight * vec3(0.4, 0.6, 1.0);
-    vec3 horizonSky = rayleighSky * 0.7;
-    vec3 zenithSky = rayleighSky * 0.5;
-    vec3 surfaceColor = mix(horizonSky, zenithSky, skyGradient);
-
-    // Get subsurface scattering contribution (LUT or ray-marching)
-    // This handles depth-dependent absorption and scattering through the water column
-    vec3 subsurfaceColor = submarineScattering(texUV,
-                                               depthMeters,
-                                               viewDir,
-                                               lightDir,
-                                               lightColor,
-                                               waveNormal,
-                                               waveNdotL,
-                                               worldPos,
-                                               time,
-                                               tangent,
-                                               bitangent,
-                                               surfaceColor);
-
-    // Blend between surface color and underwater color based on view direction relative to sun
-    // When looking toward sun: show underwater color (subsurface scattering)
-    // When looking away from sun: show surface color (sky reflection)
-    vec3 cameraToSurfaceNormalized = normalize(cameraToSurface);
-    vec3 sunDirNormalized = normalize(lightDir);
-    float viewDotSun = dot(cameraToSurfaceNormalized, sunDirNormalized);
-
-    // Blend factor: 1.0 when looking toward sun, 0.0 when looking away
-    // Use smooth transition for natural blending
-    float underwaterBlend = smoothstep(-0.3, 0.5, viewDotSun);
-
-    // Ocean color accumulation also depends on depth and sun angle
-    // Deeper water and angles closer to sun show more underwater color
-    // Use subtle enhancement to preserve scattering nuances
-    float depthFactor = clamp(depthMeters / 1000.0, 0.0, 1.0); // Normalize to 1km
-    float sunAngleFactor = max(0.0, dot(waveNormal, sunDirNormalized));
-    float accumulationFactor = depthFactor * (0.5 + 0.5 * sunAngleFactor);
-
-    // Final blend: combine view direction blend with subtle depth/sun angle accumulation
-    // Reduce accumulation impact to preserve scattering details
-    float finalBlend = mix(underwaterBlend, 1.0, accumulationFactor * 0.2); // Reduced from 0.5 to 0.2
-
-    // Blend surface color (sky) with underwater color (subsurface scattering)
-    vec3 oceanColor = mix(surfaceColor, subsurfaceColor, finalBlend);
-
-    return oceanColor;
-}
-
 // =========================================================================
 // Texture Sampling and Effect Application
 // =========================================================================
@@ -1002,57 +1360,6 @@ struct TextureSamples
     vec3 normalTangent; // Normal map in tangent space [-1,1]
     float roughness;    // Roughness value [0,1] (0=smooth/shiny, 1=rough/matte)
 };
-
-// Generate ocean normal using Perlin noise gradients
-// Returns tangent-space normal that forms smooth curves across the ocean
-vec3 generateOceanNormalNoise(vec2 texUV, vec3 worldPos)
-{
-    // Use consistent UV coordinates based on texture space for smooth curves
-    // Scale to create large-scale patterns across the ocean
-    vec2 noiseUV = texUV * 8.0;
-
-    // Small offset for gradient computation
-    float eps = 0.01;
-
-    // Sample noise at multiple scales and compute gradients
-    // Large scale waves (smooth curves)
-    float scale1 = 2.0;
-    float n1 = noise2D(noiseUV * scale1);
-    float n1x = noise2D(noiseUV * scale1 + vec2(eps, 0.0));
-    float n1y = noise2D(noiseUV * scale1 + vec2(0.0, eps));
-    float grad1x = (n1x - n1) / eps;
-    float grad1y = (n1y - n1) / eps;
-
-    // Medium scale waves
-    float scale2 = 5.0;
-    float n2 = noise2D(noiseUV * scale2 + vec2(0.5, 0.5));
-    float n2x = noise2D(noiseUV * scale2 + vec2(0.5, 0.5) + vec2(eps, 0.0));
-    float n2y = noise2D(noiseUV * scale2 + vec2(0.5, 0.5) + vec2(0.0, eps));
-    float grad2x = (n2x - n2) / eps;
-    float grad2y = (n2y - n2) / eps;
-
-    // Fine scale detail
-    float scale3 = 12.0;
-    float n3 = noise2D(noiseUV * scale3 + vec2(0.3, 0.7));
-    float n3x = noise2D(noiseUV * scale3 + vec2(0.3, 0.7) + vec2(eps, 0.0));
-    float n3y = noise2D(noiseUV * scale3 + vec2(0.3, 0.7) + vec2(0.0, eps));
-    float grad3x = (n3x - n3) / eps;
-    float grad3y = (n3y - n3) / eps;
-
-    // Combine gradients from different scales
-    // Larger scales contribute more to form smooth curves
-    float gradX = grad1x * 0.5 + grad2x * 0.3 + grad3x * 0.2;
-    float gradY = grad1y * 0.5 + grad2y * 0.3 + grad3y * 0.2;
-
-    // Scale gradients to create visible surface variation
-    gradX *= 0.3;
-    gradY *= 0.3;
-
-    // Form tangent-space normal from gradients
-    // The normal points in the direction of steepest ascent
-    vec3 normalPerturb = vec3(-gradX, -gradY, 1.0);
-    return normalize(normalPerturb);
-}
 
 // Sample all landmass textures at the given UV coordinate
 // All textures use the same UV mapping (sinusoidal, same orientation as color textures)
@@ -1085,9 +1392,6 @@ TextureSamples sampleLandmassTextures(vec2 texUV, float oceanMask, vec3 worldPos
             // Sample roughness texture using same UV coordinates as other textures
             vec4 roughnessSample = texture2D(uSpecular, texUV);
             samples.roughness = roughnessSample.r;
-
-            // DEBUG: Check if texture is being sampled (should see values between 0-1)
-            // If roughness is always 0 or 1, texture might not be loaded or UVs are wrong
         }
         else
         {
@@ -1129,88 +1433,116 @@ SurfaceProperties applyTextureEffects(vec3 baseColor,         // Base color from
     {
         // Calculate sun angle: dot product of surface normal with sun direction
         // NdotL = 1.0 when sun is overhead, 0.0 at terminator, <0.0 on night side
-        float sunAngle = dot(surfaceNormal, sunDir);
+        float NdotL = dot(surfaceNormal, sunDir);
+        NdotL = max(0.0, NdotL); // Clamp to [0,1] - no lightening on night side
 
-        // Modulate heightmap lightening by sun angle
-        // Areas facing away from sun (sunAngle < 0) get no lightening
-        // Areas facing toward sun (sunAngle > 0) get full effect, scaled by angle
-        // Use smoothstep for gradual transition at terminator
-        float sunModulation = smoothstep(-0.1, 0.3, sunAngle); // Fade from -0.1 to 0.3
-
-        // Heightmap affects brightness: higher elevations are brighter (snow/ice at peaks)
-        // Only apply when surface is facing toward sun
-        float heightBrightness =
-            1.0 + samples.height * 0.3 * sunModulation; // Up to 30% brighter at peaks, modulated by sun
-        heightModulatedColor *= heightBrightness;
+        // Sample heightmap and apply elevation-based lightening
+        float elevation = samples.height;
+        float heightFactor = elevation * 0.3;                     // Scale factor for height effect
+        heightModulatedColor += heightFactor * NdotL * vec3(1.0); // Brighten based on elevation and sun angle
     }
 
-    // Compute roughness from sampled specular texture
-    // Roughness: 0 = smooth/shiny (high specular), 1 = rough/matte (low specular)
-    // samples.roughness is already set: 0.1 for ocean, texture value for land
-    float surfaceRoughness = samples.roughness;
-
-    // Only apply roughness effects to land areas
-    if (landMask > 0.01 && uUseSpecular == 1)
-    {
-        // Base roughness from texture (intrinsic surface roughness)
-        // Texture is already inverted: lighter = less rough, darker = rougher
-        float baseRoughness = samples.roughness;
-
-        // Ice roughness effect: ice is smoother/shiny, so decrease roughness
-        // Ice has lower roughness (higher specular) than regular land
-        // Scale down the effect and apply as reduction on base roughness
-        const float ICE_ROUGHNESS_SCALE = 0.3; // Scale down ice effect (30% of full effect)
-
-        // Calculate ice smoothness: how much ice decreases roughness relative to base
-        // iceAlbedo is typically 0.5-0.9 (high reflectance = low roughness)
-        // Base roughness is typically 0.3-0.7
-        // We want: iceSmoothness = (1.0 - iceAlbedo) * coverage * scale
-        // Higher iceAlbedo (more reflective) = lower roughness
-        float iceSmoothness = (1.0 - iceAlbedo) * iceCoverage * ICE_ROUGHNESS_SCALE;
-
-        // Apply ice smoothness as reduction: baseRoughness * (1.0 - smoothness)
-        // This preserves the underlying roughness variation while making ice areas smoother
-        float iceMultiplier = 1.0 - iceSmoothness;
-
-        // Final roughness: underlying texture roughness reduced by ice effect
-        surfaceRoughness = baseRoughness * iceMultiplier;
-
-        // Clamp to reasonable range [0.05, 0.95]
-        surfaceRoughness = clamp(surfaceRoughness, 0.05, 0.95);
-    }
-    else if (landMask > 0.01 && uUseSpecular == 0)
-    {
-        // When specular is disabled, use default roughness for land
-        surfaceRoughness = 0.5;
-    }
-    // For ocean (landMask <= 0.01), keep the default 0.1 from sampleLandmassTextures
-
-    props.roughness = surfaceRoughness;
-
-    // Color is not affected by roughness (roughness only affects specular)
-    props.color = heightModulatedColor;
-
-    // Apply normal map effect
+    // Apply normal map if enabled
+    vec3 finalNormal = surfaceNormal;
     if (uUseNormalMap == 1)
     {
-        // Build TBN matrix to transform from tangent space to world space
+        vec3 normalTangent = samples.normalTangent;
         mat3 TBN = mat3(tangent, bitangent, surfaceNormal);
-        props.normal = normalize(TBN * samples.normalTangent);
+        finalNormal = normalize(TBN * normalTangent);
     }
-    else
+
+    // Apply ice coverage if present
+    vec3 finalColor = heightModulatedColor;
+    float finalRoughness = samples.roughness;
+
+    if (iceCoverage > 0.01)
     {
-        props.normal = surfaceNormal;
+        finalColor = mix(finalColor, vec3(iceAlbedo), iceCoverage);
+
+        // Make ice regions more matte (higher roughness) at the center
+        // Inverse effect: ice was shiny, now make it matte/diffuse
+        // Higher iceCoverage (center of ice regions) = higher roughness (more matte)
+        // Ice should reflect all light diffusely, not specularly
+        float iceRoughness = 0.9;    // Very matte/rough for diffuse reflection
+        float iceRoughnessMin = 0.7; // Minimum roughness even at edges
+
+        // Interpolate roughness based on ice coverage
+        // Center of ice (iceCoverage = 1.0) gets maximum roughness (0.9)
+        // Edges of ice (iceCoverage = 0.01) get minimum roughness (0.7)
+        float iceRoughnessValue = mix(iceRoughnessMin, iceRoughness, iceCoverage);
+
+        // Blend between base roughness and ice roughness based on ice coverage
+        finalRoughness = mix(finalRoughness, iceRoughnessValue, iceCoverage);
     }
+
+    props.color = finalColor;
+    props.normal = finalNormal;
+    props.roughness = finalRoughness;
 
     return props;
 }
 
 void main()
 {
-    vec2 texUV = toSinusoidalUV(vTexCoord);
+    // If rendering flat circle mode, reconstruct sphere position from ray-sphere intersection
+    // The billboard is not at the center of the planet, so we need to cast a ray from
+    // the camera through each fragment and intersect with the sphere
+    vec3 actualWorldPos = vWorldPos;
+    vec3 actualWorldNormal = vWorldNormal;
+    vec2 texCoord = vTexCoord; // Local copy for texture coordinates
+
+    if (uFlatCircleMode == 1)
+    {
+        // In flat circle mode, vWorldPos is the position on the flat billboard plane
+        // (computed in vertex shader). We need to cast a ray from the camera through
+        // this fragment position and intersect it with the sphere to get the correct
+        // surface point and UV coordinates.
+
+        // Calculate ray from camera through fragment position on billboard
+        vec3 rayOrigin = uCameraPos;
+        vec3 rayDir = normalize(vWorldPos - uCameraPos);
+
+        // Intersect ray with sphere
+        float t = raySphereIntersect(rayOrigin, rayDir, uSphereCenter, uSphereRadius);
+
+        if (t > 0.0)
+        {
+            // Calculate intersection point on sphere surface
+            vec3 intersectionPoint = rayOrigin + rayDir * t;
+
+            // Calculate direction from sphere center to intersection point
+            vec3 direction = normalize(intersectionPoint - uSphereCenter);
+
+            // Use intersection point as actual world position
+            actualWorldPos = intersectionPoint;
+
+            // Surface normal is radial from sphere center
+            // This varies per-fragment across the billboard, creating depth illusion
+            actualWorldNormal = direction;
+
+            // Calculate correct UV coordinates from intersection point
+            // Use the same coordinate system as C++ code (sphere's local coordinate system)
+            vec2 equirectUV = directionToEquirectUV(direction, uPoleDir, uPrimeMeridianDir);
+            // Update texture coordinates (note: v coordinate needs to be flipped)
+            texCoord = vec2(equirectUV.x, 1.0 - equirectUV.y);
+        }
+        else
+        {
+            // Ray doesn't intersect sphere (shouldn't happen for visible fragments)
+            // Fallback: use direction from sphere center to fragment position
+            vec3 direction = normalize(vWorldPos - uSphereCenter);
+            actualWorldPos = uSphereCenter + direction * uSphereRadius;
+            actualWorldNormal = direction;
+            vec2 equirectUV = directionToEquirectUV(direction, uPoleDir, uPrimeMeridianDir);
+            texCoord = vec2(equirectUV.x, 1.0 - equirectUV.y);
+        }
+    }
+
+    // Use the updated texture coordinates (may have been modified in flat circle mode)
+    vec2 texUV = toSinusoidalUV(texCoord);
 
     // Calculate view direction (needed for specular calculations)
-    vec3 viewDir = normalize(uCameraPos - vWorldPos);
+    vec3 viewDir = normalize(uCameraPos - actualWorldPos);
 
     // Sample color textures and blend
     vec4 col1 = texture2D(uColorTexture, texUV);
@@ -1233,10 +1565,10 @@ void main()
 
     // Sample all landmass textures using centralized function
     // Ocean areas use flat normal (no Perlin noise)
-    TextureSamples textureSamples = sampleLandmassTextures(texUV, oceanMask, vWorldPos);
+    TextureSamples textureSamples = sampleLandmassTextures(texUV, oceanMask, actualWorldPos);
 
     // Get the interpolated surface normal (normalized sphere normal = outward direction)
-    vec3 surfaceNormal = normalize(vWorldNormal);
+    vec3 surfaceNormal = normalize(actualWorldNormal);
 
     // Compute tangent frame using the planet's pole direction
     // Tangent = east direction = cross(poleDir, surfaceNormal)
@@ -1278,6 +1610,21 @@ void main()
     // Use the final normal from texture effects (already computed in applyTextureEffects)
     vec3 N = surfaceProps.normal;
 
+    // Apply procedural wave effects to water surfaces
+    // Create anisotropic wave patterns that animate over time
+    if (oceanMask > 0.01)
+    {
+        // Compute wave-perturbed normal for water
+        // Pass sun direction to consider occlusion on dark side
+        vec3 L = normalize(uLightDir);
+        vec3 waveNormal = computeWaveNormal(texUV, N, tangent, bitangent, uTime, L);
+
+        // Blend between base normal and wave normal based on ocean mask
+        // Use smooth transition to avoid artifacts at land/water boundaries
+        float waveBlend = smoothstep(0.01, 0.3, oceanMask);
+        N = normalize(mix(N, waveNormal, waveBlend));
+    }
+
     // Calculate day/night factor using sphere normal (not bump-mapped normal)
     // This gives consistent day/night across the surface
     // L is already calculated above for heightmap modulation
@@ -1305,7 +1652,7 @@ void main()
         atmosphericFactor = smoothstep(0.866, 1.0, sunReflectDotView);
     }
 
-    // Solar lighting (only affects day side) - use neutral color, no atmospheric scattering
+    // Solar lighting (only affects day side) - apply atmospheric transmittance
     float NdotL = dot(N, L); // Don't clamp yet - need raw value for shadow check
     float NdotLClamped = max(NdotL, 0.0);
 
@@ -1338,8 +1685,10 @@ void main()
         float NdotV = max(dot(N, viewDir), 0.001);
 
         // Half-vector between light and view directions
-        // L is direction FROM surface TO light, viewDir is FROM surface TO camera
-        vec3 H = normalize(L + viewDir);
+        // L is direction FROM light TO surface, so -L is FROM surface TO light
+        // viewDir is FROM surface TO camera
+        vec3 lightDirToSurface = -L; // Convert to FROM surface TO light
+        vec3 H = normalize(lightDirToSurface + viewDir);
         float NdotH = dot(N, H);
 
         // CRITICAL: Half-vector must point toward surface normal for valid specular reflection
@@ -1361,13 +1710,21 @@ void main()
             float alpha2 = alpha * alpha;
 
             // ============================================================
-            // Metalness (derived from roughness)
+            // Metalness (derived from roughness - very small base value)
             // ============================================================
-            // Metalness = inverse of roughness, scaled to max 0.5
-            // Smooth surfaces (low roughness) → higher metalness (up to 0.5)
-            // Rough surfaces (high roughness) → lower metalness (down to 0.0)
-            // This limits specular intensity for Earth's non-metallic surfaces
-            float metalness = (1.0 - roughness) * 0.5; // Max metalness = 0.5 for Earth
+            // Base metalness is very small, derived from roughness
+            // Smooth surfaces (low roughness) → slightly higher metalness
+            // Rough surfaces (high roughness) → lower metalness
+            // Water gets a small additional boost
+            float baseMetalness = (1.0 - roughness) * 0.03; // Very small base: max 0.03
+
+            // Check if this is water (ocean) - slightly increase metalness for water
+            float landMaskForMetalness = texture2D(uLandmassMask, texUV).r;
+            float oceanMaskForMetalness = 1.0 - landMaskForMetalness;
+            float waterMetalnessBoost = oceanMaskForMetalness > 0.01 ? 0.02 : 0.0; // Small boost for water only
+
+            float metalness = baseMetalness + waterMetalnessBoost;
+            metalness = clamp(metalness, 0.0, 0.05); // Cap at 0.05 total
 
             // ============================================================
             // GGX/Trowbridge-Reitz Distribution (D)
@@ -1377,22 +1734,36 @@ void main()
             float D = alpha2 / (PI * denom * denom);
 
             // ============================================================
-            // Smith Geometry Function (G)
+            // Smith Geometry Function (G) - GGX form
             // ============================================================
             // Accounts for self-shadowing and masking of microfacets
-            float lambdaL = sqrt(1.0 + (alpha2 * (1.0 - NdotLClamped * NdotLClamped)) / (NdotLClamped * NdotLClamped));
-            float lambdaV = sqrt(1.0 + (alpha2 * (1.0 - NdotV * NdotV)) / (NdotV * NdotV));
-            float G = 1.0 / (lambdaL + lambdaV);
+            // Standard numerically stable form: G1(v) = 2 / (1 + sqrt(1 + alpha^2 * tan^2(theta)))
+            float cosThetaL = NdotLClamped;
+            float cosThetaV = NdotV;
+
+            // Calculate tan^2(theta) = sin^2(theta) / cos^2(theta) = (1 - cos^2) / cos^2
+            // Use max to avoid division by zero at grazing angles
+            float tan2ThetaL = (1.0 - cosThetaL * cosThetaL) / max(cosThetaL * cosThetaL, 0.001);
+            float tan2ThetaV = (1.0 - cosThetaV * cosThetaV) / max(cosThetaV * cosThetaV, 0.001);
+
+            // Smith G1 for light direction
+            float G1_L = 2.0 / (1.0 + sqrt(1.0 + alpha2 * tan2ThetaL));
+
+            // Smith G1 for view direction
+            float G1_V = 2.0 / (1.0 + sqrt(1.0 + alpha2 * tan2ThetaV));
+
+            // Combined geometry term (separable form)
+            float G = G1_L * G1_V;
 
             // ============================================================
             // Fresnel (F) - Schlick approximation with metalness
             // ============================================================
             // F0 modulates specular intensity based on surface properties
             // Non-metallic (dirt, vegetation): F0 = 0.02
-            // Metallic (smooth surfaces): F0 up to 0.5 (capped for Earth)
+            // Metallic (smooth surfaces): F0 up to 0.12 (reduced to prevent bright edges)
             // Metalness blends between non-metallic and metallic F0
             float F0_nonMetallic = 0.02; // Base F0 for Earth's non-reflective surfaces
-            float F0_metallic = 0.5;     // Max F0 for Earth (capped to prevent too much metalness)
+            float F0_metallic = 0.12;    // Reduced max F0 to prevent bright terminating edges
             float F0 = mix(F0_nonMetallic, F0_metallic, metalness);
             float F = F0 + (1.0 - F0) * pow(1.0 - VdotH, 5.0);
 
@@ -1439,55 +1810,12 @@ void main()
     // Combined lighting: ambient + sun + moon + specular reflection
     vec3 lighting = uAmbientColor + solarDiffuse + moonDiffuse;
 
-    // Base color with combined lighting + specular reflection (single-bounce atmospheric effect)
+    // Base color with combined lighting + specular reflection
     // Use surfaceProps.color which has heightmap effects applied
     vec3 dayColor = surfaceProps.color * lighting + specularReflection;
 
-    // Ocean Surface Effects
-    // Real ocean color comes from light scattering within the water column
-
-    if (oceanMask > 0.01)
-    {
-        // View direction (camera to surface)
-        vec3 viewDir = normalize(uCameraPos - vWorldPos);
-
-        // Sample actual bathymetry depth from ETOPO data (sinusoidal projection)
-        // 0 = surface/land (masked), 1 = deepest (~11km Mariana Trench)
-        // Use sinusoidal UV directly (texUV is already in sinusoidal space)
-        // Land areas are masked to 0 in the texture, so this automatically excludes land
-        float bathyDepth = texture2D(uBathymetryDepth, texUV).r;
-
-        // Convert to meters (max ~11000m)
-        // If depth is 0 (land), return 0; otherwise use actual depth
-        float depthMeters = bathyDepth * 11000.0;
-        depthMeters = max(depthMeters, 0.0); // Land areas are 0, ocean has minimum 0
-
-        // Use sphere normal for lighting angle
-        float oceanNdotL = max(dot(surfaceNormal, L), 0.0);
-
-        // Calculate ocean color using ray-marched subsurface scattering
-        // This uses actual bathymetry and real texture colors - no hardcoded blues
-        // Use neutral sun color - atmospheric effects are handled by specular reflection
-        vec3 oceanColor = calculateOceanColor(texUV, // For texture sampling during ray march
-                                              depthMeters,
-                                              surfaceNormal, // Base sphere normal
-                                              vWorldPos,     // World position for procedural noise
-                                              viewDir,
-                                              L,           // Sun direction
-                                              uLightColor, // Neutral sunlight color (no atmospheric scattering)
-                                              oceanNdotL,
-                                              tangent,   // Tangent vector (east) for wave normal computation
-                                              bitangent, // Bitangent vector (north) for wave normal computation
-                                              uTime      // For animated waves
-        );
-
-        // Coastal Blending
-        // Smooth transition from land to ocean
-        // Only blend on actual ocean areas (oceanMask > 0.7) to preserve landmass texture effects
-        // This ensures landmass textures aren't overridden by ocean color
-        float oceanBlend = smoothstep(0.7, 0.95, oceanMask);
-        dayColor = mix(dayColor, oceanColor, oceanBlend);
-    }
+    // Ocean areas now use the same surface shader as land
+    // No special water effects - ocean renders with standard PBR surface properties
 
     // Ensure landmass texture effects are preserved on land areas
     // Re-apply texture-modified color on pure land to prevent any override

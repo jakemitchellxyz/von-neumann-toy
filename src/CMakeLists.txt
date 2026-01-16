@@ -16,9 +16,13 @@ find_package(glm CONFIG REQUIRED)
 find_package(TIFF REQUIRED)
 find_package(GDAL CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
+find_package(miniz CONFIG REQUIRED)
 
 # Find stb (header-only image loading library)
 find_path(STB_INCLUDE_DIRS "stb_image.h" HINTS ${CMAKE_PREFIX_PATH}/include)
+
+# Find tinyexr (header-only EXR library)
+find_path(TINYEXR_INCLUDE_DIRS "tinyexr.h" HINTS ${CMAKE_PREFIX_PATH}/include)
 
 # ==================================
 # Find SuperNOVAS (optional, for additional astrometry features)
@@ -179,7 +183,7 @@ add_executable(vnt
     concerns/constants.cpp
     concerns/camera-controller.cpp
     concerns/stars-dynamic-skybox.cpp
-    concerns/constellation-loader.cpp
+    concerns/preprocessing/skybox-textures.cpp
     concerns/ui-overlay.cpp
     concerns/ui-icons.cpp
     concerns/ui-primitives.cpp
@@ -189,20 +193,22 @@ add_executable(vnt
     concerns/gravity-grid.cpp
     concerns/settings.cpp
     concerns/solar-lighting.cpp
+    concerns/fxaa.cpp
+    concerns/atmosphere-renderer.cpp
     types/celestial-body.cpp
+    types/dynamic-lod-sphere.cpp
     types/lagrange-point.cpp
     types/magnetic-field.cpp
     # Earth Material Implementation
     materials/earth/setup.cpp
     materials/earth/draw.cpp
-    materials/earth/initialization/atmosphere-shader.cpp
     materials/earth/initialization/earth-surface.cpp
     materials/earth/preprocessing/color-from-blue-marble.cpp
     materials/earth/preprocessing/normal-and-height-from-elevation.cpp
     materials/earth/preprocessing/specular-from-modis-reflectance.cpp
     materials/earth/preprocessing/night-lights-from-viirs.cpp
-    materials/earth/preprocessing/atmosphere-transmittance-lut.cpp
-    materials/earth/preprocessing/water-scattering-lut.cpp
+    materials/earth/preprocessing/wind-from-netcfd.cpp
+    materials/earth/preprocessing/atmosphere-luts.cpp
     materials/earth/masks/ice-from-color.cpp
     materials/earth/masks/landmass-from-color.cpp
     materials/earth/economy/earth-economy.cpp
@@ -223,8 +229,17 @@ if(STB_INCLUDE_DIRS)
     message(STATUS "Found stb headers at: ${STB_INCLUDE_DIRS}")
 endif()
 
+# Include tinyexr headers if found
+if(TINYEXR_INCLUDE_DIRS)
+    target_include_directories(vnt PRIVATE ${TINYEXR_INCLUDE_DIRS})
+    message(STATUS "Found tinyexr headers at: ${TINYEXR_INCLUDE_DIRS}")
+else()
+    message(WARNING "tinyexr headers not found - EXR file loading will fail")
+endif()
+
 # Link libraries
-target_link_libraries(vnt PRIVATE glfw OpenGL::GL glm::glm ${CSPICE_TARGET} TIFF::TIFF GDAL::GDAL protobuf::libprotobuf)
+# miniz::miniz target automatically sets up include directories
+target_link_libraries(vnt PRIVATE glfw OpenGL::GL glm::glm ${CSPICE_TARGET} TIFF::TIFF GDAL::GDAL protobuf::libprotobuf miniz::miniz)
 target_compile_definitions(vnt PRIVATE HAS_CSPICE HAS_PROTOBUF)
 target_include_directories(vnt PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 

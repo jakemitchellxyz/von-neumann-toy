@@ -10,6 +10,8 @@
     "stb",
     "tiff",
     "gdal",
-    "protobuf"
+    "protobuf",
+    "tinyexr",
+    "miniz"
   ]
 }

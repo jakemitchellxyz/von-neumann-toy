@@ -43,6 +43,14 @@ public:
     static TextureResolution getTextureResolution();
     static void setTextureResolution(TextureResolution res);
     
+    // Get/Set FXAA antialiasing enabled
+    static bool getFXAAEnabled();
+    static void setFXAAEnabled(bool enabled);
+    
+    // Get/Set VSync enabled
+    static bool getVSyncEnabled();
+    static void setVSyncEnabled(bool enabled);
+    
     // Check if settings have changed since last save
     static bool hasUnsavedChanges();
     
@@ -55,6 +63,8 @@ public:
 private:
     static TextureResolution s_textureResolution;
     static TextureResolution s_runningResolution;
+    static bool s_fxaaEnabled;
+    static bool s_vsyncEnabled;
     static bool s_hasUnsavedChanges;
     static bool s_loaded;
 };

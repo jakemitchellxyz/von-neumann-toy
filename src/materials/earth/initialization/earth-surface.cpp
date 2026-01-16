@@ -20,7 +20,9 @@
 #include <vector>
 
 // stb_image for loading textures
+// Note: STB_IMAGE_IMPLEMENTATION is defined in setup.cpp, so we just include the header here
 #include <stb_image.h>
+
 
 GLuint EarthMaterial::loadTexture(const std::string &filepath)
 {
@@ -36,18 +38,34 @@ GLuint EarthMaterial::loadTexture(const std::string &filepath)
     }
 
     GLenum format = GL_RGB;
+    GLenum internalFormat = GL_RGB;
     if (channels == 1)
+    {
         format = GL_LUMINANCE;
+        internalFormat = GL_LUMINANCE;
+    }
+    else if (channels == 2)
+    {
+        // 2-channel RG format (for wind textures: R=u, G=v)
+        format = GL_LUMINANCE_ALPHA; // GL_LUMINANCE_ALPHA maps R->LUMINANCE, G->ALPHA in older OpenGL
+        internalFormat = GL_LUMINANCE_ALPHA;
+    }
     else if (channels == 3)
+    {
         format = GL_RGB;
+        internalFormat = GL_RGB;
+    }
     else if (channels == 4)
+    {
         format = GL_RGBA;
+        internalFormat = GL_RGBA;
+    }
 
     GLuint textureId;
     glGenTextures(1, &textureId);
     glBindTexture(GL_TEXTURE_2D, textureId);
 
-    glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, GL_UNSIGNED_BYTE, data);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -57,6 +75,57 @@ GLuint EarthMaterial::loadTexture(const std::string &filepath)
     glBindTexture(GL_TEXTURE_2D, 0);
 
     stbi_image_free(data);
+
+    return textureId;
+}
+
+// Specialized loader for wind textures (2-channel RG format)
+// Ensures proper 2-channel texture loading for wind force vectors
+GLuint EarthMaterial::loadWindTexture(const std::string &filepath)
+{
+    int width, height, channels;
+    stbi_set_flip_vertically_on_load(true); // OpenGL expects bottom-to-top
+
+    // Force load as 2 channels (RG format: R=u wind, G=v wind)
+    unsigned char *data = stbi_load(filepath.c_str(), &width, &height, &channels, 2);
+
+    if (!data)
+    {
+        std::cerr << "Failed to load wind texture: " << filepath << "\n";
+        return 0;
+    }
+
+    if (channels != 2)
+    {
+        std::cerr << "WARNING: Wind texture has " << channels << " channels, expected 2 (RG format)" << "\n";
+        std::cerr << "  This may cause incorrect wind data sampling" << "\n";
+    }
+
+    GLuint textureId;
+    glGenTextures(1, &textureId);
+    glBindTexture(GL_TEXTURE_2D, textureId);
+
+    // Try to use GL_RG format (OpenGL 3.0+) for proper 2-channel storage
+    // Fall back to GL_LUMINANCE_ALPHA if GL_RG is not available (OpenGL 2.1)
+    GLenum internalFormat = GL_LUMINANCE_ALPHA;
+    GLenum format = GL_LUMINANCE_ALPHA;
+
+    // Check if GL_RG is available (requires OpenGL 3.0+ or ARB_texture_rg extension)
+    // For now, we'll use GL_LUMINANCE_ALPHA and sample with .ra in the shader
+    // GL_LUMINANCE_ALPHA stores: first channel -> LUMINANCE (replicated to RGB), second channel -> ALPHA
+    // So sampling gives (L, L, L, A), and we use .ra to get (u wind, v wind)
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    stbi_image_free(data);
+
+    std::cout << "  Wind texture loaded: " << width << "x" << height << " (2 channels: RG)" << "\n";
 
     return textureId;
 }
@@ -267,6 +336,7 @@ bool EarthMaterial::initializeSurfaceShader()
     uniformNormalMap_ = glGetUniformLocation(shaderProgram_, "uNormalMap");
     uniformHeightmap_ = glGetUniformLocation(shaderProgram_, "uHeightmap");
     uniformUseHeightmap_ = glGetUniformLocation(shaderProgram_, "uUseHeightmap");
+    uniformUseDisplacement_ = glGetUniformLocation(shaderProgram_, "uUseDisplacement");
     uniformUseSpecular_ = glGetUniformLocation(shaderProgram_, "uUseSpecular");
     uniformSpecular_ = glGetUniformLocation(shaderProgram_, "uSpecular");
     uniformLightDir_ = glGetUniformLocation(shaderProgram_, "uLightDir");
@@ -282,6 +352,10 @@ bool EarthMaterial::initializeSurfaceShader()
     glUseProgram(0);
 
     uniformNightlights_ = glGetUniformLocation(shaderProgram_, "uNightlights");
+    uniformWindTexture1_ = glGetUniformLocation(shaderProgram_, "uWindTexture1");
+    uniformWindTexture2_ = glGetUniformLocation(shaderProgram_, "uWindTexture2");
+    uniformWindBlendFactor_ = glGetUniformLocation(shaderProgram_, "uWindBlendFactor");
+    uniformWindTextureSize_ = glGetUniformLocation(shaderProgram_, "uWindTextureSize");
     uniformTime_ = glGetUniformLocation(shaderProgram_, "uTime");
     uniformMicroNoise_ = glGetUniformLocation(shaderProgram_, "uMicroNoise");
     uniformHourlyNoise_ = glGetUniformLocation(shaderProgram_, "uHourlyNoise");
@@ -291,14 +365,22 @@ bool EarthMaterial::initializeSurfaceShader()
     uniformIceBlendFactor_ = glGetUniformLocation(shaderProgram_, "uIceBlendFactor");
     uniformLandmassMask_ = glGetUniformLocation(shaderProgram_, "uLandmassMask");
     uniformCameraPos_ = glGetUniformLocation(shaderProgram_, "uCameraPos");
+    uniformCameraDir_ = glGetUniformLocation(shaderProgram_, "uCameraDir");
+    uniformCameraFOV_ = glGetUniformLocation(shaderProgram_, "uCameraFOV");
+    uniformPrimeMeridianDir_ = glGetUniformLocation(shaderProgram_, "uPrimeMeridianDir");
     uniformBathymetryDepth_ = glGetUniformLocation(shaderProgram_, "uBathymetryDepth");
     uniformBathymetryNormal_ = glGetUniformLocation(shaderProgram_, "uBathymetryNormal");
     uniformCombinedNormal_ = glGetUniformLocation(shaderProgram_, "uCombinedNormal");
-    uniformWaterTransmittanceLUT_ = glGetUniformLocation(shaderProgram_, "uWaterTransmittanceLUT");
-    uniformWaterSingleScatterLUT_ = glGetUniformLocation(shaderProgram_, "uWaterSingleScatterLUT");
-    uniformWaterMultiscatterLUT_ = glGetUniformLocation(shaderProgram_, "uWaterMultiscatterLUT");
-    uniformUseWaterScatteringLUT_ = glGetUniformLocation(shaderProgram_, "uUseWaterScatteringLUT");
+    uniformWindTexture1_ = glGetUniformLocation(shaderProgram_, "uWindTexture1");
+    uniformWindTexture2_ = glGetUniformLocation(shaderProgram_, "uWindTexture2");
+    uniformWindBlendFactor_ = glGetUniformLocation(shaderProgram_, "uWindBlendFactor");
+    uniformWindTextureSize_ = glGetUniformLocation(shaderProgram_, "uWindTextureSize");
     uniformPlanetRadius_ = glGetUniformLocation(shaderProgram_, "uPlanetRadius");
+    uniformFlatCircleMode_ = glGetUniformLocation(shaderProgram_, "uFlatCircleMode");
+    uniformSphereCenter_ = glGetUniformLocation(shaderProgram_, "uSphereCenter");
+    uniformSphereRadius_ = glGetUniformLocation(shaderProgram_, "uSphereRadius");
+    uniformBillboardCenter_ = glGetUniformLocation(shaderProgram_, "uBillboardCenter");
+    uniformDisplacementScale_ = glGetUniformLocation(shaderProgram_, "uDisplacementScale");
 
     shaderAvailable_ = true;
     return true;
@@ -385,6 +467,101 @@ bool EarthMaterial::initialize(const std::string &combinedBasePath, TextureResol
     else
     {
         std::cout << "  Nightlights: not found (run preprocessNightlights first)" << "\n";
+    }
+
+    // Load wind textures (12 separate 2D textures, one per month)
+    // Each JPG file: width x height, RGB format (R=u, G=v, B=0)
+    int windTexturesLoadedCount = 0;
+    for (int month = 1; month <= 12; month++)
+    {
+        char filename[64];
+        snprintf(filename, sizeof(filename), "earth_wind_%02d.jpg", month);
+        std::string windFile = combinedPath + "/" + filename;
+
+        if (!std::filesystem::exists(windFile))
+        {
+            windTextures_[month - 1] = 0;
+            windTexturesLoaded_[month - 1] = false;
+            continue;
+        }
+
+        // Load JPG file using stb_image
+        int jpgWidth, jpgHeight, jpgChannels;
+        unsigned char *jpgData = stbi_load(windFile.c_str(), &jpgWidth, &jpgHeight, &jpgChannels, 3);
+
+        if (!jpgData)
+        {
+            std::cerr << "  ERROR: Failed to load wind texture file: " << windFile << "\n";
+            std::cerr << "  Error: " << stbi_failure_reason() << "\n";
+            windTextures_[month - 1] = 0;
+            windTexturesLoaded_[month - 1] = false;
+            continue;
+        }
+
+        if (jpgChannels < 3)
+        {
+            std::cerr << "  ERROR: Wind texture has " << jpgChannels << " channels, expected 3 (RGB format)" << "\n";
+            stbi_image_free(jpgData);
+            windTextures_[month - 1] = 0;
+            windTexturesLoaded_[month - 1] = false;
+            continue;
+        }
+
+        // Create 2D texture
+        GLuint textureId = 0;
+        glGenTextures(1, &textureId);
+        if (textureId == 0)
+        {
+            std::cerr << "  ERROR: Failed to generate texture for month " << month << "\n";
+            stbi_image_free(jpgData);
+            windTextures_[month - 1] = 0;
+            windTexturesLoaded_[month - 1] = false;
+            continue;
+        }
+
+        glBindTexture(GL_TEXTURE_2D, textureId);
+
+        // Extract R and G channels from RGB JPG data to create LUMINANCE_ALPHA texture
+        size_t pixelCount = static_cast<size_t>(jpgWidth) * jpgHeight;
+        std::vector<unsigned char> twoChannelData(pixelCount * 2);
+        for (size_t i = 0; i < pixelCount; i++)
+        {
+            twoChannelData[i * 2 + 0] = jpgData[i * 3 + 0]; // R -> LUMINANCE (u component)
+            twoChannelData[i * 2 + 1] = jpgData[i * 3 + 1]; // G -> ALPHA (v component)
+        }
+
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_LUMINANCE_ALPHA,
+                     jpgWidth,
+                     jpgHeight,
+                     0,
+                     GL_LUMINANCE_ALPHA,
+                     GL_UNSIGNED_BYTE,
+                     twoChannelData.data());
+
+        // Set texture parameters
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        stbi_image_free(jpgData);
+
+        windTextures_[month - 1] = textureId;
+        windTexturesLoaded_[month - 1] = true;
+        windTexturesLoadedCount++;
+    }
+
+    if (windTexturesLoadedCount > 0)
+    {
+        std::cout << "  Wind textures: " << windTexturesLoadedCount << "/12 loaded" << "\n";
+    }
+    else
+    {
+        std::cout << "  Wind textures: not found (run preprocessWindData first)" << "\n";
     }
 
     // Load specular/roughness texture (surface reflectivity from MODIS green channel)
@@ -480,12 +657,11 @@ bool EarthMaterial::initialize(const std::string &combinedBasePath, TextureResol
         std::cout << "  Combined normal map: not found (shadows will use fallback)" << "\n";
     }
 
-    // Initialize shaders for per-pixel normal mapping and atmosphere
+    // Initialize shaders for per-pixel normal mapping
     // MANDATORY: Shader initialization (will abort on failure)
     // This initializes both surface shader and atmosphere shader
     initializeShaders();
     std::cout << "  Shader: initialized (per-pixel normal mapping enabled)" << "\n";
-    std::cout << "  Atmosphere: initialized (Rayleigh/Mie scattering)" << "\n";
 
     // Generate noise textures for city light flickering (requires GL context)
     generateNoiseTextures();
@@ -508,179 +684,6 @@ bool EarthMaterial::initialize(const std::string &combinedBasePath, TextureResol
         std::exit(1);
     }
 
-    // Load water scattering LUTs if available (from luts folder)
-    std::string lutsPath = combinedBasePath + "/luts";
-    std::string waterTransmittancePath = lutsPath + "/earth_water_transmittance_lut.hdr";
-    std::string waterSingleScatterPath = lutsPath + "/earth_water_single_scatter_lut.hdr";
-    std::string waterMultiscatterPath = lutsPath + "/earth_water_multiscatter_lut.hdr";
-
-    bool allWaterLUTsLoaded = true;
-
-    if (std::filesystem::exists(waterTransmittancePath))
-    {
-        if (loadWaterTransmittanceLUT(waterTransmittancePath))
-        {
-            std::cout << "  Water transmittance LUT: loaded" << "\n";
-        }
-        else
-        {
-            std::cout << "  Water transmittance LUT: failed to load" << "\n";
-            allWaterLUTsLoaded = false;
-        }
-    }
-    else
-    {
-        std::cout << "  Water transmittance LUT: not found" << "\n";
-        allWaterLUTsLoaded = false;
-    }
-
-    if (std::filesystem::exists(waterSingleScatterPath))
-    {
-        if (loadWaterSingleScatterLUT(waterSingleScatterPath))
-        {
-            std::cout << "  Water single scatter LUT: loaded" << "\n";
-        }
-        else
-        {
-            std::cout << "  Water single scatter LUT: failed to load" << "\n";
-            allWaterLUTsLoaded = false;
-        }
-    }
-    else
-    {
-        std::cout << "  Water single scatter LUT: not found" << "\n";
-        allWaterLUTsLoaded = false;
-    }
-
-    if (std::filesystem::exists(waterMultiscatterPath))
-    {
-        if (loadWaterMultiscatterLUT(waterMultiscatterPath))
-        {
-            std::cout << "  Water multiscatter LUT: loaded" << "\n";
-        }
-        else
-        {
-            std::cout << "  Water multiscatter LUT: failed to load" << "\n";
-            allWaterLUTsLoaded = false;
-        }
-    }
-    else
-    {
-        std::cout << "  Water multiscatter LUT: not found" << "\n";
-        allWaterLUTsLoaded = false;
-    }
-
-    if (!allWaterLUTsLoaded)
-    {
-        std::cout << "    Run preprocessing to generate water LUTs in: " << lutsPath << "\n";
-    }
-
     initialized_ = true;
-    return true;
-}
-
-// Load Water Transmittance LUT (T_water)
-bool EarthMaterial::loadWaterTransmittanceLUT(const std::string &lutPath)
-{
-    if (!std::filesystem::exists(lutPath))
-    {
-        std::cerr << "Water transmittance LUT not found: " << lutPath << "\n";
-        return false;
-    }
-
-    std::cout << "Loading water transmittance LUT from: " << lutPath << "\n";
-
-    // Load HDR image
-    int width, height, channels;
-    stbi_set_flip_vertically_on_load(true);
-    float *data = stbi_loadf(lutPath.c_str(), &width, &height, &channels, 3);
-
-    if (!data)
-    {
-        std::cerr << "Failed to load water transmittance LUT: " << lutPath << "\n";
-        return false;
-    }
-
-    glGenTextures(1, &waterTransmittanceLUT_);
-    glBindTexture(GL_TEXTURE_2D, waterTransmittanceLUT_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, data);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    stbi_image_free(data);
-    waterTransmittanceLUTLoaded_ = true;
-    return true;
-}
-
-// Load Water Single Scattering LUT (S1_water)
-bool EarthMaterial::loadWaterSingleScatterLUT(const std::string &lutPath)
-{
-    if (!std::filesystem::exists(lutPath))
-    {
-        std::cerr << "Water single scatter LUT not found: " << lutPath << "\n";
-        return false;
-    }
-
-    std::cout << "Loading water single scatter LUT from: " << lutPath << "\n";
-
-    int width, height, channels;
-    stbi_set_flip_vertically_on_load(true);
-    float *data = stbi_loadf(lutPath.c_str(), &width, &height, &channels, 3);
-
-    if (!data)
-    {
-        std::cerr << "Failed to load water single scatter LUT: " << lutPath << "\n";
-        return false;
-    }
-
-    glGenTextures(1, &waterSingleScatterLUT_);
-    glBindTexture(GL_TEXTURE_2D, waterSingleScatterLUT_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, data);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    stbi_image_free(data);
-    waterSingleScatterLUTLoaded_ = true;
-    return true;
-}
-
-// Load Water Multiple Scattering LUT (Sm_water)
-bool EarthMaterial::loadWaterMultiscatterLUT(const std::string &lutPath)
-{
-    if (!std::filesystem::exists(lutPath))
-    {
-        std::cerr << "Water multiscatter LUT not found: " << lutPath << "\n";
-        return false;
-    }
-
-    std::cout << "Loading water multiscatter LUT from: " << lutPath << "\n";
-
-    int width, height, channels;
-    stbi_set_flip_vertically_on_load(true);
-    float *data = stbi_loadf(lutPath.c_str(), &width, &height, &channels, 3);
-
-    if (!data)
-    {
-        std::cerr << "Failed to load water multiscatter LUT: " << lutPath << "\n";
-        return false;
-    }
-
-    glGenTextures(1, &waterMultiscatterLUT_);
-    glBindTexture(GL_TEXTURE_2D, waterMultiscatterLUT_);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, data);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    stbi_image_free(data);
-    waterMultiscatterLUTLoaded_ = true;
     return true;
 }

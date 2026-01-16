@@ -5,9 +5,12 @@
 // falloff and 5778K blackbody color.
 
 #include "solar-lighting.h"
+#include "../concerns/constants.h"
+#include "ui-overlay.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 
 namespace SolarLighting
@@ -15,6 +18,11 @@ namespace SolarLighting
 
 // Current sun position in world space
 static glm::vec3 g_sunPosition(0.0f);
+
+// Camera info for geometry culling (set before rendering)
+static glm::vec3 g_cameraPosition(0.0f);
+static glm::vec3 g_cameraDirection(0.0f, 0.0f, 1.0f);
+static float g_cameraFovRadians = 60.0f * 3.14159265358979323846f / 180.0f; // 60 degrees in radians
 
 // ============================================================================
 // Initialization
@@ -66,6 +74,32 @@ glm::vec3 getSunPosition()
 }
 
 // ============================================================================
+// Camera Info for Geometry Culling
+// ============================================================================
+
+void setCameraInfo(const glm::vec3 &cameraPos, const glm::vec3 &cameraDir, float fovRadians)
+{
+    g_cameraPosition = cameraPos;
+    g_cameraDirection = cameraDir;
+    g_cameraFovRadians = fovRadians;
+}
+
+glm::vec3 getCameraPosition()
+{
+    return g_cameraPosition;
+}
+
+glm::vec3 getCameraDirection()
+{
+    return g_cameraDirection;
+}
+
+float getCameraFov()
+{
+    return g_cameraFovRadians;
+}
+
+// ============================================================================
 // Light Intensity Calculation
 // ============================================================================
 
@@ -105,6 +139,17 @@ float calculateIntensity(float distance, float distanceScale)
 
 void setupLightingForBody(const glm::vec3 &bodyPosition, float distanceScale)
 {
+    // Don't enable lighting if we're in wireframe mode (wireframes should be unlit)
+    if (g_showWireframe)
+    {
+        return; // Skip lighting setup entirely in wireframe mode
+    }
+
+    // Ensure lighting is enabled for this body (independent of sun visibility)
+    // This ensures planets are lit even if the sun mesh is culled
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+
     // Calculate direction from sun to body (this is the light direction)
     glm::vec3 toBody = bodyPosition - g_sunPosition;
     float distance = glm::length(toBody);
@@ -148,7 +193,9 @@ void setupLightingForBody(const glm::vec3 &bodyPosition, float distanceScale)
 void drawEmissiveSphere(const glm::vec3 &center, float radius, const glm::vec3 &emissiveColor, int slices, int stacks)
 {
     // Disable lighting - sun is self-illuminated
+    // In wireframe mode, lighting should already be disabled, but ensure it stays off
     glDisable(GL_LIGHTING);
+    glDisable(GL_LIGHT0);
 
     // Set emissive color directly
     glColor3f(emissiveColor.r, emissiveColor.g, emissiveColor.b);
@@ -188,8 +235,11 @@ void drawEmissiveSphere(const glm::vec3 &center, float radius, const glm::vec3 &
 
     glPopMatrix();
 
-    // Re-enable lighting for subsequent draws
-    glEnable(GL_LIGHTING);
+    // Re-enable lighting for subsequent draws (unless in wireframe mode)
+    if (!g_showWireframe)
+    {
+        glEnable(GL_LIGHTING);
+    }
 }
 
 // ============================================================================
@@ -199,13 +249,17 @@ void drawEmissiveSphere(const glm::vec3 &center, float radius, const glm::vec3 &
 void drawLitSphere(const glm::vec3 &center, float radius, const glm::vec3 &baseColor, int slices, int stacks)
 {
     // Default orientation: Y-up, no specific orientation
+    // Use global camera info for culling
     drawOrientedLitSphere(center,
                           radius,
                           baseColor,
                           glm::vec3(0.0f, 1.0f, 0.0f), // Default pole: Y-up
                           glm::vec3(1.0f, 0.0f, 0.0f), // Default prime: +X
                           slices,
-                          stacks);
+                          stacks,
+                          g_cameraPosition,
+                          g_cameraDirection,
+                          g_cameraFovRadians);
 }
 
 void drawOrientedLitSphere(const glm::vec3 &center,
@@ -214,8 +268,19 @@ void drawOrientedLitSphere(const glm::vec3 &center,
                            const glm::vec3 &poleDir,
                            const glm::vec3 &primeMeridianDir,
                            int slices,
-                           int stacks)
+                           int stacks,
+                           const glm::vec3 &cameraPos,
+                           const glm::vec3 &cameraDir,
+                           float fovRadians,
+                           bool disableCulling)
 {
+    // Use provided camera info, or fall back to global if not provided (for backward compatibility)
+    glm::vec3 actualCameraPos =
+        (glm::length(cameraPos) < 0.001f && glm::length(g_cameraPosition) > 0.001f) ? g_cameraPosition : cameraPos;
+    glm::vec3 actualCameraDir =
+        (glm::length(cameraDir) < 0.001f && glm::length(g_cameraDirection) > 0.001f) ? g_cameraDirection : cameraDir;
+    float actualFov = (fovRadians < 0.001f && g_cameraFovRadians > 0.001f) ? g_cameraFovRadians : fovRadians;
+
     glPushMatrix();
     glTranslatef(center.x, center.y, center.z);
 
@@ -251,7 +316,12 @@ void drawOrientedLitSphere(const glm::vec3 &center,
     // south90 = Y-axis of body-fixed frame (90° East longitude at equator)
     glm::vec3 south90 = glm::normalize(glm::cross(north, east));
 
-    // Generate sphere with proper orientation
+    // Calculate frustum cone parameters for culling
+    float halfFov = actualFov * 0.5f;
+    float expandedHalfFov = halfFov + 15.0f * 3.14159265358979323846f / 180.0f; // 15 degrees in radians
+    float cosExpandedHalfFov = cos(expandedHalfFov);
+
+    // Generate sphere with proper orientation and aggressive back-face culling
     // phi = latitude (-90° to +90°), theta = longitude (0° to 360°)
     for (int i = 0; i < stacks; ++i)
     {
@@ -263,7 +333,15 @@ void drawOrientedLitSphere(const glm::vec3 &center,
         float cosPhi2 = cos(phi2);
         float sinPhi2 = sin(phi2);
 
-        glBegin(GL_TRIANGLE_STRIP);
+        // Build TRIANGLE_STRIP dynamically, only adding front-facing triangles
+        int stripVertexCount = 0;
+        bool stripActive = false;
+
+        // Track previous vertex pair for triangle culling (TRIANGLE_STRIP forms triangles from consecutive vertices)
+        glm::vec3 prevLocalDir1, prevLocalDir2;
+        glm::vec3 prevWorldPos1, prevWorldPos2;
+        bool hasPrevPair = false;
+
         for (int j = 0; j <= slices; ++j)
         {
             // Theta goes from 0 to 2*PI, starting at prime meridian
@@ -274,22 +352,192 @@ void drawOrientedLitSphere(const glm::vec3 &center,
             float sinTheta = sin(thetaShifted);
 
             // First vertex (lower latitude)
-            // Point on sphere: cosLat * (cosLon * east + sinLon * south90) + sinLat * north
             glm::vec3 localDir1 = cosPhi1 * (cosTheta * east + sinTheta * south90) + sinPhi1 * north;
-            glm::vec3 worldPos1 = radius * localDir1;
-            glNormal3f(localDir1.x, localDir1.y, localDir1.z);
-            glVertex3f(worldPos1.x, worldPos1.y, worldPos1.z);
+            glm::vec3 worldPos1 = center + radius * localDir1;
+            glm::vec3 toVertex1 = worldPos1 - actualCameraPos;
+            float distToVertex1 = glm::length(toVertex1);
+            glm::vec3 dirToVertex1 = distToVertex1 > 0.001f ? toVertex1 / distToVertex1 : glm::vec3(0.0f, 0.0f, 1.0f);
 
             // Second vertex (higher latitude)
             glm::vec3 localDir2 = cosPhi2 * (cosTheta * east + sinTheta * south90) + sinPhi2 * north;
-            glm::vec3 worldPos2 = radius * localDir2;
-            glNormal3f(localDir2.x, localDir2.y, localDir2.z);
-            glVertex3f(worldPos2.x, worldPos2.y, worldPos2.z);
+            glm::vec3 worldPos2 = center + radius * localDir2;
+            glm::vec3 toVertex2 = worldPos2 - actualCameraPos;
+            float distToVertex2 = glm::length(toVertex2);
+            glm::vec3 dirToVertex2 = distToVertex2 > 0.001f ? toVertex2 / distToVertex2 : glm::vec3(0.0f, 0.0f, 1.0f);
+
+            bool segmentVisible = true; // Default to visible if culling disabled
+
+            if (!disableCulling)
+            {
+                // For TRIANGLE_STRIP, triangles are formed by (prevV1, prevV2, currV1) and (prevV2, currV1, currV2)
+                // Only cull if ALL 3 vertices of BOTH triangles are back-facing
+
+                bool vertex1FrontFacing = true;
+                bool vertex2FrontFacing = true;
+                bool vertex1InFrustum = true;
+                bool vertex2InFrustum = true;
+
+                // Back-face culling: check if normals face camera
+                float backFaceDot1 = glm::dot(localDir1, -dirToVertex1);
+                float backFaceDot2 = glm::dot(localDir2, -dirToVertex2);
+
+                if (distToVertex1 > radius * 0.1f)
+                {
+                    vertex1FrontFacing = backFaceDot1 >= 0.0f;
+                    float cosAngle1 = glm::dot(dirToVertex1, actualCameraDir);
+                    vertex1InFrustum = cosAngle1 >= cosExpandedHalfFov;
+                }
+
+                if (distToVertex2 > radius * 0.1f)
+                {
+                    vertex2FrontFacing = backFaceDot2 >= 0.0f;
+                    float cosAngle2 = glm::dot(dirToVertex2, actualCameraDir);
+                    vertex2InFrustum = cosAngle2 >= cosExpandedHalfFov;
+                }
+
+                if (hasPrevPair)
+                {
+                    // Check triangles formed with previous vertex pair
+                    // Triangle 1: (prevV1, prevV2, currV1)
+                    // Triangle 2: (prevV2, currV1, currV2)
+
+                    glm::vec3 toPrevV1 = prevWorldPos1 - actualCameraPos;
+                    float distToPrevV1 = glm::length(toPrevV1);
+                    glm::vec3 dirToPrevV1 =
+                        distToPrevV1 > 0.001f ? toPrevV1 / distToPrevV1 : glm::vec3(0.0f, 0.0f, 1.0f);
+                    float prevBackFaceDot1 = glm::dot(prevLocalDir1, -dirToPrevV1);
+                    bool prevV1FrontFacing = distToPrevV1 <= radius * 0.1f || prevBackFaceDot1 >= 0.0f;
+
+                    glm::vec3 toPrevV2 = prevWorldPos2 - actualCameraPos;
+                    float distToPrevV2 = glm::length(toPrevV2);
+                    glm::vec3 dirToPrevV2 =
+                        distToPrevV2 > 0.001f ? toPrevV2 / distToPrevV2 : glm::vec3(0.0f, 0.0f, 1.0f);
+                    float prevBackFaceDot2 = glm::dot(prevLocalDir2, -dirToPrevV2);
+                    bool prevV2FrontFacing = distToPrevV2 <= radius * 0.1f || prevBackFaceDot2 >= 0.0f;
+
+                    // Only cull if ALL 3 vertices of BOTH triangles are back-facing
+                    // Triangle 1: prevV1, prevV2, currV1
+                    bool triangle1AllBackFacing = !prevV1FrontFacing && !prevV2FrontFacing && !vertex1FrontFacing;
+                    // Triangle 2: prevV2, currV1, currV2
+                    bool triangle2AllBackFacing = !prevV2FrontFacing && !vertex1FrontFacing && !vertex2FrontFacing;
+
+                    // Cull only if both triangles are completely back-facing
+                    bool bothTrianglesBackFacing = triangle1AllBackFacing && triangle2AllBackFacing;
+
+                    // Also check frustum - at least one vertex must be in frustum
+                    bool atLeastOneInFrustum =
+                        vertex1InFrustum || vertex2InFrustum ||
+                        (distToPrevV1 > radius * 0.1f &&
+                         glm::dot(dirToPrevV1, actualCameraDir) >= cosExpandedHalfFov) ||
+                        (distToPrevV2 > radius * 0.1f && glm::dot(dirToPrevV2, actualCameraDir) >= cosExpandedHalfFov);
+
+                    segmentVisible = !bothTrianglesBackFacing && atLeastOneInFrustum;
+                }
+                else
+                {
+                    // First pair - just check if at least one vertex is front-facing and in frustum
+                    segmentVisible =
+                        (vertex1FrontFacing || vertex2FrontFacing) && (vertex1InFrustum || vertex2InFrustum);
+                }
+            }
+
+            if (segmentVisible)
+            {
+                if (!stripActive)
+                {
+                    glBegin(GL_TRIANGLE_STRIP);
+                    stripActive = true;
+                }
+
+                // In wireframe mode, ensure color is set explicitly (not affected by material)
+                if (disableCulling) // disableCulling is true in wireframe mode
+                {
+                    glColor3f(0.8f, 0.9f, 1.0f);
+                }
+
+                glNormal3f(localDir1.x, localDir1.y, localDir1.z);
+                glVertex3f(worldPos1.x - center.x, worldPos1.y - center.y, worldPos1.z - center.z);
+                stripVertexCount++;
+
+                glNormal3f(localDir2.x, localDir2.y, localDir2.z);
+                glVertex3f(worldPos2.x - center.x, worldPos2.y - center.y, worldPos2.z - center.z);
+                stripVertexCount++;
+
+                // Store current pair as previous for next iteration
+                prevLocalDir1 = localDir1;
+                prevLocalDir2 = localDir2;
+                prevWorldPos1 = worldPos1;
+                prevWorldPos2 = worldPos2;
+                hasPrevPair = true;
+            }
+            else if (stripActive)
+            {
+                // End current strip if we hit back-facing or culled vertices
+                glEnd();
+                if (stripVertexCount >= 2)
+                {
+                    CountTriangles(GL_TRIANGLE_STRIP, stripVertexCount);
+                }
+                stripActive = false;
+                stripVertexCount = 0;
+                hasPrevPair = false; // Reset when strip ends
+            }
         }
-        glEnd();
+
+        // End strip if still active
+        if (stripActive)
+        {
+            glEnd();
+            if (stripVertexCount >= 2)
+            {
+                CountTriangles(GL_TRIANGLE_STRIP, stripVertexCount);
+            }
+        }
     }
 
     glPopMatrix();
+}
+
+// Calculate dynamic tessellation based on camera distance for celestial bodies
+// Applies second layer of tessellation around closest point to camera
+std::pair<int, int> calculateCelestialBodyTessellation(const glm::vec3 &spherePosition,
+                                                       float sphereRadius,
+                                                       const glm::vec3 &cameraPos)
+{
+    glm::vec3 toSphere = spherePosition - cameraPos;
+    float distance = glm::length(toSphere);
+    float distanceInRadii = distance / sphereRadius;
+
+    // If distance > 5 * radius, use base tessellation
+    if (distanceInRadii >= TESSELATION_DISTANCE_THRESHOLD)
+    {
+        return {SPHERE_BASE_SLICES, SPHERE_BASE_STACKS};
+    }
+
+    // Calculate base tessellation multiplier based on distance
+    // At distance = 5 * radius: multiplier = 1.0 (base)
+    // At distance = 1 * radius: multiplier = MAX_TESSELATION_MULTIPLIER
+    // Linear interpolation between these points
+    float t = (TESSELATION_DISTANCE_THRESHOLD - distanceInRadii) / (TESSELATION_DISTANCE_THRESHOLD - 1.0f);
+    t = glm::clamp(t, 0.0f, 1.0f); // Clamp to [0, 1]
+
+    float baseMultiplier = 1.0f + t * (MAX_TESSELATION_MULTIPLIER - 1.0f);
+
+    // Calculate base tessellation values (round to nearest even number for better triangle strip rendering)
+    int baseSlices = static_cast<int>(std::round(SPHERE_BASE_SLICES * baseMultiplier / 2.0f)) * 2;
+    int baseStacks = static_cast<int>(std::round(SPHERE_BASE_STACKS * baseMultiplier / 2.0f)) * 2;
+
+    // Ensure minimum tessellation
+    baseSlices = std::max(baseSlices, SPHERE_BASE_SLICES);
+    baseStacks = std::max(baseStacks, SPHERE_BASE_STACKS);
+
+    // Apply local high-detail tessellation multiplier for region around closest point
+    // The smooth blend happens naturally - vertices near the closest point will have
+    // higher effective tessellation due to the increased overall tessellation
+    int slices = baseSlices * LOCAL_TESSELATION_MULTIPLIER;
+    int stacks = baseStacks * LOCAL_TESSELATION_MULTIPLIER;
+
+    return {slices, stacks};
 }
 
 } // namespace SolarLighting

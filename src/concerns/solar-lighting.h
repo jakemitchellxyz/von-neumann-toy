@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <utility>
 
 // ==================================
 // Solar Lighting System
@@ -45,6 +46,17 @@ void setSunPosition(const glm::vec3& sunPos);
 // Get the current sun position
 glm::vec3 getSunPosition();
 
+// Set camera info for geometry culling (called before rendering)
+// cameraPos: camera position in world space
+// cameraDir: camera forward direction (normalized)
+// fovRadians: camera field of view in radians
+void setCameraInfo(const glm::vec3& cameraPos, const glm::vec3& cameraDir, float fovRadians);
+
+// Get camera info for geometry culling
+glm::vec3 getCameraPosition();
+glm::vec3 getCameraDirection();
+float getCameraFov();
+
 // Configure lighting for a body at the given position
 // This updates GL_LIGHT0 to point from the sun toward the body
 // with intensity based on inverse-square falloff
@@ -71,8 +83,19 @@ void drawLitSphere(const glm::vec3& center, float radius, const glm::vec3& baseC
 // Uses pole and prime meridian directions from SPICE data for correct orientation
 // poleDir: direction of the planet's north pole (rotation axis)
 // primeMeridianDir: direction of the prime meridian (0° longitude at equator)
+// cameraPos: camera position for back-face and frustum culling
+// cameraDir: camera forward direction for frustum culling
+// fovRadians: camera field of view in radians for frustum culling
 void drawOrientedLitSphere(const glm::vec3& center, float radius, const glm::vec3& baseColor,
                            const glm::vec3& poleDir, const glm::vec3& primeMeridianDir,
-                           int slices, int stacks);
+                           int slices, int stacks,
+                           const glm::vec3& cameraPos, const glm::vec3& cameraDir, float fovRadians,
+                           bool disableCulling = false);
+
+// Calculate dynamic tessellation based on camera distance for celestial bodies
+// Returns (slices, stacks) tuple
+std::pair<int, int> calculateCelestialBodyTessellation(const glm::vec3& spherePosition,
+                                                        float sphereRadius,
+                                                        const glm::vec3& cameraPos);
 
 } // namespace SolarLighting

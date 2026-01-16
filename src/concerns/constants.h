@@ -136,6 +136,11 @@ extern const double DAYS_PER_TROPICAL_YEAR; // Days per tropical year (365.2425)
 constexpr int MONTHS_PER_YEAR = 12;         // Number of months in a year (for monthly texture arrays)
 
 // ==================================
+// Coordinate System Constants
+// ==================================
+extern const double OBLIQUITY_J2000_RAD; // Obliquity of the ecliptic at J2000.0 (radians) ≈ 23.4392911°
+
+// ==================================
 // Earth Atmospheric Constants
 // ==================================
 extern const double KARMAN_LINE_KM;           // Kármán line: boundary of space (100 km above Earth's surface)
@@ -144,8 +149,15 @@ extern const double SCATTERING_ATMOSPHERE_KM; // Optically significant atmospher
 // ==================================
 // Sphere Rendering Constants
 // ==================================
-constexpr int SPHERE_BASE_SLICES = 64; // Base number of longitude divisions (slices) for sphere tessellation
+constexpr int SPHERE_BASE_SLICES = 32; // Base number of longitude divisions (slices) for sphere tessellation
 constexpr int SPHERE_BASE_STACKS = 32; // Base number of latitude divisions (stacks) for sphere tessellation
+constexpr float TESSELATION_DISTANCE_THRESHOLD = 5.0f; // Distance threshold (in radii) for dynamic tessellation
+constexpr int MAX_TESSELATION_MULTIPLIER = 4;          // Maximum tessellation multiplier when very close
+constexpr float LOCAL_TESSELATION_RADIUS =
+    0.5f; // Radius (in sphere radii) for local high-detail tessellation around closest point
+constexpr int LOCAL_TESSELATION_MULTIPLIER = 8; // Additional multiplier for local high-detail region
+constexpr int FAR_TRIANGLE_COUNT_MAX = 64;      // Maximum number of triangles for pie-style rendering when far away
+constexpr int FAR_TRIANGLE_COUNT_MIN = 16;      // Minimum number of triangles for pie-style rendering at 5 radii
 
 // ==================================
 // Visualization Scale Factors
@@ -159,57 +171,22 @@ extern const float SKYBOX_RADIUS;
 // ==================================
 // Render Settings (mutable at runtime)
 // ==================================
-extern bool g_showOrbits;           // Show/hide orbital paths
-extern bool g_showRotationAxes;     // Show/hide rotation axes and equators
-extern bool g_showBarycenters;      // Show/hide barycenter markers
-extern bool g_showLagrangePoints;   // Show/hide Lagrange points
-extern bool g_showCoordinateGrids;  // Show/hide planet coordinate grids
-extern bool g_showMagneticFields;   // Show/hide magnetic field lines
-extern bool g_showGravityGrid;      // Show/hide gravity spacetime grid
-extern bool g_showConstellations;   // Show/hide constellation lines and labels
-extern bool g_showForceVectors;     // Show/hide gravity and momentum force vectors
-extern bool g_showAtmosphereLayers; // Show/hide atmosphere layer rings
-extern bool g_showSunSpot;          // Show/hide sun spot visualization (circle + cross at overhead position)
-extern bool g_enableAtmosphere;     // Enable/disable atmosphere rendering (fullscreen ray march)
-extern bool g_useAtmosphereLUT;     // Use precomputed transmittance LUT instead of ray marching (faster)
-extern bool g_useMultiscatterLUT;   // Use precomputed multiscatter LUT instead of fallback (faster, better quality)
-extern int g_gravityGridResolution; // Grid lines per axis (10-50)
-extern float g_gravityWarpStrength; // Warp strength multiplier (0.1-5.0)
-
-// ==================================
-// Star Data
-// ==================================
-struct Star
-{
-    float ra;  // Right Ascension in hours (0-24)
-    float dec; // Declination in degrees (-90 to +90)
-    float mag; // Apparent magnitude (lower = brighter)
-    const char *name;
-};
-
-extern const std::vector<Star> BRIGHT_STARS;
-
-// ==================================
-// Constellation Data
-// ==================================
-// A constellation is defined by its name and a list of line segments
-// Each line segment connects two stars by name
-struct ConstellationLine
-{
-    const char *star1;
-    const char *star2;
-};
-
-struct Constellation
-{
-    const char *name;
-    std::vector<ConstellationLine> lines;
-};
-
-extern const std::vector<Constellation> CONSTELLATIONS;
-
-// Find a star by name in BRIGHT_STARS (returns nullptr if not found)
-const Star *findStarByName(const char *name);
+extern bool g_showOrbits;               // Show/hide orbital paths
+extern bool g_showRotationAxes;         // Show/hide rotation axes and equators
+extern bool g_showBarycenters;          // Show/hide barycenter markers
+extern bool g_showLagrangePoints;       // Show/hide Lagrange points
+extern bool g_showCoordinateGrids;      // Show/hide planet coordinate grids
+extern bool g_showMagneticFields;       // Show/hide magnetic field lines
+extern bool g_showGravityGrid;          // Show/hide gravity spacetime grid
+extern bool g_showForceVectors;         // Show/hide gravity and momentum force vectors
+extern bool g_showSunSpot;              // Show/hide sun spot visualization (circle + cross at overhead position)
+extern int g_gravityGridResolution;     // Grid lines per axis (10-50)
+extern float g_gravityWarpStrength;     // Warp strength multiplier (0.1-5.0)
+extern bool g_showConstellations;       // Show/hide constellation stars
+extern bool g_showCelestialGrid;        // Show/hide celestial grid overlay
+extern bool g_showConstellationFigures; // Show/hide constellation figure lines
+extern bool g_showConstellationBounds;  // Show/hide constellation boundary lines
+extern bool g_showWireframe;            // Show/hide wireframe mode (triangle edges)
 
 // ==================================
 // Helper Functions

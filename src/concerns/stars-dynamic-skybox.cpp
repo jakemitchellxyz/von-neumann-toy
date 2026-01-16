@@ -1,19 +1,22 @@
 #include "stars-dynamic-skybox.h"
+#include "../materials/helpers/gl.h"
+#include "../materials/helpers/shader-loader.h"
 #include "constants.h"
-#include "constellation-loader.h"
 #include "settings.h"
+#include "ui-overlay.h"
 #include <GLFW/glfw3.h>
-#include <glm/gtc/type_ptr.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <cmath>
-#include <iostream>
 #include <algorithm>
 #include <cctype>
-#include <map>
-#include <vector>
-#include <fstream>
-#include <sstream>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <iostream>
+#include <map>
+#include <sstream>
+#include <vector>
+
 
 // stb_image for loading/saving textures (implementation in earth-material.cpp)
 #include <stb_image.h>
@@ -24,31 +27,20 @@
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
 
+// GL_REPEAT may not be defined in basic Windows OpenGL headers
+#ifndef GL_REPEAT
+#define GL_REPEAT 0x2901
+#endif
+
 // GL_GENERATE_MIPMAP may not be defined
 #ifndef GL_GENERATE_MIPMAP
 #define GL_GENERATE_MIPMAP 0x8191
 #endif
 
 // ==================================
-// Hipparcos Star Data
-// ==================================
-struct HipStar {
-    int hipId;
-    double raRad;       // Right Ascension at J1991.25 (radians)
-    double decRad;      // Declination at J1991.25 (radians)
-    double parallax;    // Parallax in mas
-    double pmRA;        // Proper motion in RA (mas/yr)
-    double pmDec;       // Proper motion in Dec (mas/yr)
-    float magnitude;    // Hp magnitude
-};
-
-// ==================================
 // Global State
 // ==================================
-static std::vector<HipStar> g_hipStars;
-static std::vector<LoadedConstellation> g_loadedConstellations;
 static bool g_skyboxInitialized = false;
-static double g_referenceJD = 0.0;  // Reference epoch for star positions
 
 // Star texture state
 static GLuint g_starTexture = 0;
@@ -56,169 +48,227 @@ static bool g_starTextureReady = false;
 static int g_starTextureWidth = 0;
 static int g_starTextureHeight = 0;
 
-// Hipparcos reference epoch: J1991.25 = JD 2448349.0625
-static constexpr double HIP_EPOCH_JD = 2448349.0625;
+// Additional celestial skybox textures
+static GLuint g_constellationFiguresTexture = 0;
+static GLuint g_constellationGridTexture = 0;
+static GLuint g_constellationBoundsTexture = 0;
+static GLuint g_milkywayTexture = 0; // Milky Way EXR file
+static GLuint g_hiptycTexture = 0;   // Hiptyc stars EXR file
+static bool g_constellationFiguresReady = false;
+static bool g_constellationGridReady = false;
+static bool g_constellationBoundsReady = false;
+static bool g_milkywayReady = false;
+static bool g_hiptycReady = false;
 
-// Maximum magnitude to display (lower = brighter, 6.5 is naked eye limit)
-static constexpr float MAX_DISPLAY_MAGNITUDE = 7.0f;
+// Skybox shader program
+static GLuint g_skyboxShaderProgram = 0;
+static GLint g_skyboxUniformTexture = -1;
+static GLint g_skyboxUniformUseAdditive = -1;
+static GLint g_skyboxUniformExposure = -1;
+static bool g_skyboxShaderReady = false;
 
 // ==================================
-// Hipparcos Catalog Loading
+// Shader Helper Functions
 // ==================================
 
-static bool loadHipparcosCatalog(const std::string& filepath) {
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
-        std::cerr << "Warning: Could not open Hipparcos catalog: " << filepath << std::endl;
-        return false;
+static GLuint compileSkyboxShader(GLenum type, const char *source)
+{
+    if (glCreateShader == nullptr)
+    {
+        std::cerr << "Failed to load OpenGL shader extensions" << '\n';
+        return 0;
     }
-    
-    g_hipStars.clear();
-    std::string line;
-    int loadedCount = 0;
-    int brightCount = 0;
-    
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        
-        std::istringstream iss(line);
-        
-        // hip2.dat format (space-separated):
-        // Col 1: HIP number
-        // Col 2-4: Solution type flags  
-        // Col 5: RA in radians (J1991.25)
-        // Col 6: Dec in radians (J1991.25)
-        // Col 7: Parallax (mas)
-        // Col 8: PM in RA*cos(dec) (mas/yr)
-        // Col 9: PM in Dec (mas/yr)
-        // ... more columns ...
-        // Col 21: Hp magnitude
-        
-        HipStar star;
-        int dummy1, dummy2, dummy3;
-        double dummy4, dummy5, dummy6, dummy7, dummy8, dummy9, dummy10;
-        double dummy11, dummy12, dummy13;
-        
-        // Parse the space-separated format
-        // hip2.dat columns:
-        // 1: HIP, 2-4: flags, 5: RA, 6: Dec, 7: parallax, 8: pmRA, 9: pmDec
-        // 10-14: errors, 15: Ntr, 16: F2, 17: var, 18: epoch, 19: ?, 20: Hp mag
-        if (!(iss >> star.hipId >> dummy1 >> dummy2 >> dummy3 
-                  >> star.raRad >> star.decRad >> star.parallax 
-                  >> star.pmRA >> star.pmDec
-                  >> dummy4 >> dummy5 >> dummy6 >> dummy7 >> dummy8  // cols 10-14 (errors)
-                  >> dummy9 >> dummy10 >> dummy11 >> dummy12         // cols 15-18
-                  >> dummy13                                         // col 19
-                  >> star.magnitude)) {                              // col 20 = Hp magnitude
-            continue;  // Skip malformed lines
-        }
-        
-        loadedCount++;
-        
-        // Only keep stars bright enough to display
-        if (star.magnitude <= MAX_DISPLAY_MAGNITUDE) {
-            g_hipStars.push_back(star);
-            brightCount++;
-        }
+
+    GLuint shader = glCreateShader(type);
+    if (shader == 0)
+    {
+        std::cerr << "Failed to create skybox shader" << '\n';
+        return 0;
     }
-    
-    // Count stars by magnitude range for verification
-    int veryBright = 0, bright = 0, medium = 0, dim = 0;
-    float minMag = 100.0f, maxMag = -100.0f;
-    for (const auto& s : g_hipStars) {
-        if (s.magnitude < minMag) minMag = s.magnitude;
-        if (s.magnitude > maxMag) maxMag = s.magnitude;
-        if (s.magnitude < 0) veryBright++;
-        else if (s.magnitude < 2) bright++;
-        else if (s.magnitude < 4) medium++;
-        else dim++;
+
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+
+    GLint success = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (success == 0)
+    {
+        GLint logLength = 0;
+        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLength);
+        std::vector<char> log(logLength);
+        glGetShaderInfoLog(shader, logLength, nullptr, log.data());
+        std::cerr << "Skybox shader compilation failed:\n" << log.data() << '\n';
+        glDeleteShader(shader);
+        return 0;
     }
-    
-    std::cout << "Hipparcos catalog: loaded " << brightCount << " bright stars (mag <= " 
-              << MAX_DISPLAY_MAGNITUDE << ") from " << loadedCount << " total entries\n";
-    std::cout << "  Magnitude range: " << minMag << " to " << maxMag << "\n";
-    std::cout << "  Distribution: " << veryBright << " very bright (mag<0), " 
-              << bright << " bright (0-2), " << medium << " medium (2-4), " 
-              << dim << " dim (4+)" << std::endl;
-    
-    return !g_hipStars.empty();
+
+    return shader;
 }
 
-// Propagate star position from J1991.25 to target Julian Date using proper motion
-static void propagateStarPosition(const HipStar& star, double targetJD, double& raOut, double& decOut) {
-    // Calculate time difference in years
-    double deltaYears = (targetJD - HIP_EPOCH_JD) / 365.25;
-    
-    // Convert proper motion from mas/yr to radians/yr
-    double pmRARad = (star.pmRA / 1000.0) * (PI / 180.0) / 3600.0;
-    double pmDecRad = (star.pmDec / 1000.0) * (PI / 180.0) / 3600.0;
-    
-    // Apply proper motion (simplified, ignores cos(dec) correction already in pmRA)
-    raOut = star.raRad + pmRARad * deltaYears / cos(star.decRad);
-    decOut = star.decRad + pmDecRad * deltaYears;
-    
-    // Normalize RA to 0-2π
-    while (raOut < 0) raOut += 2.0 * PI;
-    while (raOut >= 2.0 * PI) raOut -= 2.0 * PI;
-    
-    // Clamp Dec to valid range
-    if (decOut > PI / 2.0) decOut = PI / 2.0;
-    if (decOut < -PI / 2.0) decOut = -PI / 2.0;
+static GLuint linkSkyboxProgram(GLuint vertexShader, GLuint fragmentShader)
+{
+    if (glCreateProgram == nullptr)
+    {
+        std::cerr << "Failed to load OpenGL shader extensions" << '\n';
+        return 0;
+    }
+
+    GLuint program = glCreateProgram();
+    if (program == 0)
+    {
+        std::cerr << "Failed to create skybox shader program" << '\n';
+        return 0;
+    }
+
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
+
+    GLint success = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (success == 0)
+    {
+        GLint logLength = 0;
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logLength);
+        std::vector<char> log(logLength);
+        glGetProgramInfoLog(program, logLength, nullptr, log.data());
+        std::cerr << "Skybox shader program linking failed:\n" << log.data() << '\n';
+        glDeleteProgram(program);
+        return 0;
+    }
+
+    return program;
+}
+
+static std::string getSkyboxShaderPath(const std::string &filename)
+{
+    // Try multiple possible paths
+    std::vector<std::string> paths = {
+        "shaders/" + filename,
+        "src/concerns/shaders/" + filename,
+        "../src/concerns/shaders/" + filename,
+        "../../src/concerns/shaders/" + filename,
+    };
+
+    for (const auto &path : paths)
+    {
+        std::ifstream test(path);
+        if (test.good())
+        {
+            test.close();
+            return path;
+        }
+    }
+
+    // Return first path as default (will fail with error message)
+    return paths[0];
+}
+
+static bool initializeSkyboxShader()
+{
+    if (g_skyboxShaderReady && g_skyboxShaderProgram != 0)
+    {
+        return true;
+    }
+
+    // Ensure GL extensions are loaded
+    if (!loadGLExtensions())
+    {
+        std::cerr << "ERROR: Failed to load OpenGL extensions for skybox shader" << '\n';
+        return false;
+    }
+
+    // Load vertex shader
+    std::string vertexShaderPath = getSkyboxShaderPath("skybox-vertex.glsl");
+    std::string vertexShaderSource = loadShaderFile(vertexShaderPath);
+    if (vertexShaderSource.empty())
+    {
+        std::cerr << "ERROR: Could not load skybox-vertex.glsl from file" << '\n';
+        std::cerr << "  Tried path: " << vertexShaderPath << '\n';
+        return false;
+    }
+
+    // Load fragment shader
+    std::string fragmentShaderPath = getSkyboxShaderPath("skybox-fragment.glsl");
+    std::string fragmentShaderSource = loadShaderFile(fragmentShaderPath);
+    if (fragmentShaderSource.empty())
+    {
+        std::cerr << "ERROR: Could not load skybox-fragment.glsl from file" << '\n';
+        std::cerr << "  Tried path: " << fragmentShaderPath << '\n';
+        return false;
+    }
+
+    // Compile shaders
+    GLuint vertexShader = compileSkyboxShader(GL_VERTEX_SHADER, vertexShaderSource.c_str());
+    if (vertexShader == 0)
+    {
+        return false;
+    }
+
+    GLuint fragmentShader = compileSkyboxShader(GL_FRAGMENT_SHADER, fragmentShaderSource.c_str());
+    if (fragmentShader == 0)
+    {
+        glDeleteShader(vertexShader);
+        return false;
+    }
+
+    // Link program
+    g_skyboxShaderProgram = linkSkyboxProgram(vertexShader, fragmentShader);
+    if (g_skyboxShaderProgram == 0)
+    {
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+        return false;
+    }
+
+    // Get uniform locations
+    g_skyboxUniformTexture = glGetUniformLocation(g_skyboxShaderProgram, "skyboxTexture");
+    g_skyboxUniformUseAdditive = glGetUniformLocation(g_skyboxShaderProgram, "useAdditiveBlending");
+    g_skyboxUniformExposure = glGetUniformLocation(g_skyboxShaderProgram, "exposure");
+
+    // Clean up shader objects (they're linked into the program now)
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    g_skyboxShaderReady = true;
+    std::cout << "Skybox shader initialized successfully" << '\n';
+    return true;
 }
 
 // ==================================
 // Initialization
 // ==================================
 
-void InitializeSkybox(const std::string& defaultsPath) {
-    if (g_skyboxInitialized) {
+void InitializeSkybox(const std::string &defaultsPath)
+{
+    if (g_skyboxInitialized)
+    {
         return;
     }
-    
-    // Load Hipparcos catalog
-    std::string catalogPath = defaultsPath + "/catalogues/hip2.dat";
-    if (!loadHipparcosCatalog(catalogPath)) {
-        std::cerr << "Warning: Failed to load Hipparcos catalog" << std::endl;
-    }
-    
-    // Load constellation patterns from JSON5 files
-    std::string constellationsPath = defaultsPath + "/constellations";
-    g_loadedConstellations = loadConstellationsFromDirectory(constellationsPath);
-    
-    if (g_loadedConstellations.empty()) {
-        std::cerr << "Warning: No constellations loaded from " << constellationsPath << std::endl;
-    } else {
-        std::cout << "Loaded " << g_loadedConstellations.size() << " constellation patterns" << std::endl;
-    }
-    
+
     g_skyboxInitialized = true;
 }
 
-bool IsSkyboxInitialized() {
+bool IsSkyboxInitialized()
+{
     return g_skyboxInitialized;
 }
 
 // ==================================
 // Helper Functions
 // ==================================
-
-// IAU 2006 obliquity of the ecliptic at J2000.0
-// This is the angle between Earth's equator and the ecliptic plane
-// Value: 84381.406 arcseconds = 23.4392911 degrees = 0.4090928042 radians
-static const double OBLIQUITY_J2000_DEG = 23.4392911;
-static const double OBLIQUITY_J2000_RAD = 0.4090928042223289;
-
-// Convert Right Ascension and Declination (J2000 equatorial) to 3D Cartesian 
+// Convert Right Ascension and Declination (J2000 equatorial) to 3D Cartesian
 // coordinates in our ecliptic-aligned display system
 // ra: in radians (0 to 2π)
 // dec: in radians (-π/2 to π/2)
-glm::vec3 raDecToCartesian(float ra, float dec, float radius) {
+glm::vec3 raDecToCartesian(float ra, float dec, float radius)
+{
     // Step 1: Convert RA/Dec to J2000 equatorial Cartesian
     // J2000 equatorial: X -> vernal equinox (0h RA), Y -> 90° RA (6h), Z -> celestial north pole
     double x_eq = cos(dec) * cos(ra);
     double y_eq = cos(dec) * sin(ra);
     double z_eq = sin(dec);
-    
+
     // Step 2: Rotate from J2000 equatorial to J2000 ecliptic
     // This is a rotation around the X-axis by the obliquity ε
     // [ 1    0       0     ]   [ x_eq ]
@@ -226,35 +276,37 @@ glm::vec3 raDecToCartesian(float ra, float dec, float radius) {
     // [ 0 -sin(ε)  cos(ε)  ]   [ z_eq ]
     double cosObl = cos(OBLIQUITY_J2000_RAD);
     double sinObl = sin(OBLIQUITY_J2000_RAD);
-    
+
     double x_ecl = x_eq;
     double y_ecl = cosObl * y_eq + sinObl * z_eq;
     double z_ecl = -sinObl * y_eq + cosObl * z_eq;
-    
+
     // Step 3: Convert to our display coordinates (Y-up, right-handed)
     // J2000 ecliptic: X -> vernal equinox, Y -> 90° ecl lon, Z -> ecliptic north pole
     // Display: X -> same, Y -> up (ecl Z), Z -> negated ecl Y (for right-handedness)
     float x_disp = static_cast<float>(x_ecl) * radius;
-    float y_disp = static_cast<float>(z_ecl) * radius;   // Ecliptic Z -> Display Y (up)
-    float z_disp = static_cast<float>(-y_ecl) * radius;  // Ecliptic Y -> Display -Z (right-handed)
-    
+    float y_disp = static_cast<float>(z_ecl) * radius;  // Ecliptic Z -> Display Y (up)
+    float z_disp = static_cast<float>(-y_ecl) * radius; // Ecliptic Y -> Display -Z (right-handed)
+
     return glm::vec3(x_disp, y_disp, z_disp);
 }
 
 // Overload for hours/degrees (used by constellation loader)
-glm::vec3 raDecToCartesianHours(float raHours, float decDeg, float radius) {
+glm::vec3 raDecToCartesianHours(float raHours, float decDeg, float radius)
+{
     float raRad = raHours * (2.0f * static_cast<float>(PI) / 24.0f);
     float decRad = glm::radians(decDeg);
     return raDecToCartesian(raRad, decRad, radius);
 }
 
 // Calculate Earth's rotation angle for the current Julian Date
-float getEarthRotationAngle(double jd) {
+float getEarthRotationAngle(double jd)
+{
     double T = (jd - JD_J2000) / 36525.0;
-    double gmst = 280.46061837 + 360.98564736629 * (jd - JD_J2000) 
-                  + 0.000387933 * T * T;
+    double gmst = 280.46061837 + 360.98564736629 * (jd - JD_J2000) + 0.000387933 * T * T;
     gmst = fmod(gmst, 360.0);
-    if (gmst < 0) gmst += 360.0;
+    if (gmst < 0)
+        gmst += 360.0;
     return static_cast<float>(gmst);
 }
 
@@ -262,658 +314,828 @@ float getEarthRotationAngle(double jd) {
 // Billboard Text Character Definitions
 // ==================================
 
-struct CharSegment {
+struct CharSegment
+{
     float x1, y1, x2, y2;
 };
 
-static const std::vector<CharSegment>& getCharSegments(char c) {
+static const std::vector<CharSegment> &getCharSegments(char c)
+{
     static std::map<char, std::vector<CharSegment>> chars;
     static bool initialized = false;
-    
-    if (!initialized) {
-        chars['A'] = {{0,0, 0.5f,1}, {0.5f,1, 1,0}, {0.2f,0.4f, 0.8f,0.4f}};
-        chars['B'] = {{0,0, 0,1}, {0,1, 0.7f,1}, {0.7f,1, 0.7f,0.55f}, {0.7f,0.55f, 0,0.5f}, {0,0.5f, 0.7f,0.5f}, {0.7f,0.5f, 0.7f,0}, {0.7f,0, 0,0}};
-        chars['C'] = {{1,0.2f, 0.3f,0}, {0.3f,0, 0,0.3f}, {0,0.3f, 0,0.7f}, {0,0.7f, 0.3f,1}, {0.3f,1, 1,0.8f}};
-        chars['D'] = {{0,0, 0,1}, {0,1, 0.6f,1}, {0.6f,1, 1,0.7f}, {1,0.7f, 1,0.3f}, {1,0.3f, 0.6f,0}, {0.6f,0, 0,0}};
-        chars['E'] = {{1,0, 0,0}, {0,0, 0,1}, {0,1, 1,1}, {0,0.5f, 0.7f,0.5f}};
-        chars['F'] = {{0,0, 0,1}, {0,1, 1,1}, {0,0.5f, 0.7f,0.5f}};
-        chars['G'] = {{1,0.8f, 0.3f,1}, {0.3f,1, 0,0.7f}, {0,0.7f, 0,0.3f}, {0,0.3f, 0.3f,0}, {0.3f,0, 1,0.2f}, {1,0.2f, 1,0.5f}, {1,0.5f, 0.5f,0.5f}};
-        chars['H'] = {{0,0, 0,1}, {1,0, 1,1}, {0,0.5f, 1,0.5f}};
-        chars['I'] = {{0.3f,0, 0.7f,0}, {0.5f,0, 0.5f,1}, {0.3f,1, 0.7f,1}};
-        chars['J'] = {{0.2f,1, 0.8f,1}, {0.5f,1, 0.5f,0.2f}, {0.5f,0.2f, 0.3f,0}, {0.3f,0, 0,0.2f}};
-        chars['K'] = {{0,0, 0,1}, {0,0.5f, 1,1}, {0.3f,0.65f, 1,0}};
-        chars['L'] = {{0,1, 0,0}, {0,0, 1,0}};
-        chars['M'] = {{0,0, 0,1}, {0,1, 0.5f,0.5f}, {0.5f,0.5f, 1,1}, {1,1, 1,0}};
-        chars['N'] = {{0,0, 0,1}, {0,1, 1,0}, {1,0, 1,1}};
-        chars['O'] = {{0.3f,0, 0,0.3f}, {0,0.3f, 0,0.7f}, {0,0.7f, 0.3f,1}, {0.3f,1, 0.7f,1}, {0.7f,1, 1,0.7f}, {1,0.7f, 1,0.3f}, {1,0.3f, 0.7f,0}, {0.7f,0, 0.3f,0}};
-        chars['P'] = {{0,0, 0,1}, {0,1, 0.7f,1}, {0.7f,1, 1,0.75f}, {1,0.75f, 1,0.55f}, {1,0.55f, 0.7f,0.5f}, {0.7f,0.5f, 0,0.5f}};
-        chars['Q'] = {{0.3f,0, 0,0.3f}, {0,0.3f, 0,0.7f}, {0,0.7f, 0.3f,1}, {0.3f,1, 0.7f,1}, {0.7f,1, 1,0.7f}, {1,0.7f, 1,0.3f}, {1,0.3f, 0.7f,0}, {0.7f,0, 0.3f,0}, {0.6f,0.3f, 1,0}};
-        chars['R'] = {{0,0, 0,1}, {0,1, 0.7f,1}, {0.7f,1, 1,0.75f}, {1,0.75f, 1,0.55f}, {1,0.55f, 0.7f,0.5f}, {0.7f,0.5f, 0,0.5f}, {0.5f,0.5f, 1,0}};
-        chars['S'] = {{1,0.8f, 0.3f,1}, {0.3f,1, 0,0.75f}, {0,0.75f, 0.3f,0.5f}, {0.3f,0.5f, 0.7f,0.5f}, {0.7f,0.5f, 1,0.25f}, {1,0.25f, 0.7f,0}, {0.7f,0, 0,0.2f}};
-        chars['T'] = {{0,1, 1,1}, {0.5f,1, 0.5f,0}};
-        chars['U'] = {{0,1, 0,0.3f}, {0,0.3f, 0.3f,0}, {0.3f,0, 0.7f,0}, {0.7f,0, 1,0.3f}, {1,0.3f, 1,1}};
-        chars['V'] = {{0,1, 0.5f,0}, {0.5f,0, 1,1}};
-        chars['W'] = {{0,1, 0.25f,0}, {0.25f,0, 0.5f,0.5f}, {0.5f,0.5f, 0.75f,0}, {0.75f,0, 1,1}};
-        chars['X'] = {{0,0, 1,1}, {0,1, 1,0}};
-        chars['Y'] = {{0,1, 0.5f,0.5f}, {1,1, 0.5f,0.5f}, {0.5f,0.5f, 0.5f,0}};
-        chars['Z'] = {{0,1, 1,1}, {1,1, 0,0}, {0,0, 1,0}};
+
+    if (!initialized)
+    {
+        chars['A'] = {{0, 0, 0.5f, 1}, {0.5f, 1, 1, 0}, {0.2f, 0.4f, 0.8f, 0.4f}};
+        chars['B'] = {{0, 0, 0, 1},
+                      {0, 1, 0.7f, 1},
+                      {0.7f, 1, 0.7f, 0.55f},
+                      {0.7f, 0.55f, 0, 0.5f},
+                      {0, 0.5f, 0.7f, 0.5f},
+                      {0.7f, 0.5f, 0.7f, 0},
+                      {0.7f, 0, 0, 0}};
+        chars['C'] = {{1, 0.2f, 0.3f, 0},
+                      {0.3f, 0, 0, 0.3f},
+                      {0, 0.3f, 0, 0.7f},
+                      {0, 0.7f, 0.3f, 1},
+                      {0.3f, 1, 1, 0.8f}};
+        chars['D'] = {{0, 0, 0, 1},
+                      {0, 1, 0.6f, 1},
+                      {0.6f, 1, 1, 0.7f},
+                      {1, 0.7f, 1, 0.3f},
+                      {1, 0.3f, 0.6f, 0},
+                      {0.6f, 0, 0, 0}};
+        chars['E'] = {{1, 0, 0, 0}, {0, 0, 0, 1}, {0, 1, 1, 1}, {0, 0.5f, 0.7f, 0.5f}};
+        chars['F'] = {{0, 0, 0, 1}, {0, 1, 1, 1}, {0, 0.5f, 0.7f, 0.5f}};
+        chars['G'] = {{1, 0.8f, 0.3f, 1},
+                      {0.3f, 1, 0, 0.7f},
+                      {0, 0.7f, 0, 0.3f},
+                      {0, 0.3f, 0.3f, 0},
+                      {0.3f, 0, 1, 0.2f},
+                      {1, 0.2f, 1, 0.5f},
+                      {1, 0.5f, 0.5f, 0.5f}};
+        chars['H'] = {{0, 0, 0, 1}, {1, 0, 1, 1}, {0, 0.5f, 1, 0.5f}};
+        chars['I'] = {{0.3f, 0, 0.7f, 0}, {0.5f, 0, 0.5f, 1}, {0.3f, 1, 0.7f, 1}};
+        chars['J'] = {{0.2f, 1, 0.8f, 1}, {0.5f, 1, 0.5f, 0.2f}, {0.5f, 0.2f, 0.3f, 0}, {0.3f, 0, 0, 0.2f}};
+        chars['K'] = {{0, 0, 0, 1}, {0, 0.5f, 1, 1}, {0.3f, 0.65f, 1, 0}};
+        chars['L'] = {{0, 1, 0, 0}, {0, 0, 1, 0}};
+        chars['M'] = {{0, 0, 0, 1}, {0, 1, 0.5f, 0.5f}, {0.5f, 0.5f, 1, 1}, {1, 1, 1, 0}};
+        chars['N'] = {{0, 0, 0, 1}, {0, 1, 1, 0}, {1, 0, 1, 1}};
+        chars['O'] = {{0.3f, 0, 0, 0.3f},
+                      {0, 0.3f, 0, 0.7f},
+                      {0, 0.7f, 0.3f, 1},
+                      {0.3f, 1, 0.7f, 1},
+                      {0.7f, 1, 1, 0.7f},
+                      {1, 0.7f, 1, 0.3f},
+                      {1, 0.3f, 0.7f, 0},
+                      {0.7f, 0, 0.3f, 0}};
+        chars['P'] = {{0, 0, 0, 1},
+                      {0, 1, 0.7f, 1},
+                      {0.7f, 1, 1, 0.75f},
+                      {1, 0.75f, 1, 0.55f},
+                      {1, 0.55f, 0.7f, 0.5f},
+                      {0.7f, 0.5f, 0, 0.5f}};
+        chars['Q'] = {{0.3f, 0, 0, 0.3f},
+                      {0, 0.3f, 0, 0.7f},
+                      {0, 0.7f, 0.3f, 1},
+                      {0.3f, 1, 0.7f, 1},
+                      {0.7f, 1, 1, 0.7f},
+                      {1, 0.7f, 1, 0.3f},
+                      {1, 0.3f, 0.7f, 0},
+                      {0.7f, 0, 0.3f, 0},
+                      {0.6f, 0.3f, 1, 0}};
+        chars['R'] = {{0, 0, 0, 1},
+                      {0, 1, 0.7f, 1},
+                      {0.7f, 1, 1, 0.75f},
+                      {1, 0.75f, 1, 0.55f},
+                      {1, 0.55f, 0.7f, 0.5f},
+                      {0.7f, 0.5f, 0, 0.5f},
+                      {0.5f, 0.5f, 1, 0}};
+        chars['S'] = {{1, 0.8f, 0.3f, 1},
+                      {0.3f, 1, 0, 0.75f},
+                      {0, 0.75f, 0.3f, 0.5f},
+                      {0.3f, 0.5f, 0.7f, 0.5f},
+                      {0.7f, 0.5f, 1, 0.25f},
+                      {1, 0.25f, 0.7f, 0},
+                      {0.7f, 0, 0, 0.2f}};
+        chars['T'] = {{0, 1, 1, 1}, {0.5f, 1, 0.5f, 0}};
+        chars['U'] = {{0, 1, 0, 0.3f}, {0, 0.3f, 0.3f, 0}, {0.3f, 0, 0.7f, 0}, {0.7f, 0, 1, 0.3f}, {1, 0.3f, 1, 1}};
+        chars['V'] = {{0, 1, 0.5f, 0}, {0.5f, 0, 1, 1}};
+        chars['W'] = {{0, 1, 0.25f, 0}, {0.25f, 0, 0.5f, 0.5f}, {0.5f, 0.5f, 0.75f, 0}, {0.75f, 0, 1, 1}};
+        chars['X'] = {{0, 0, 1, 1}, {0, 1, 1, 0}};
+        chars['Y'] = {{0, 1, 0.5f, 0.5f}, {1, 1, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f, 0}};
+        chars['Z'] = {{0, 1, 1, 1}, {1, 1, 0, 0}, {0, 0, 1, 0}};
         chars[' '] = {};
-        chars['-'] = {{0.2f,0.5f, 0.8f,0.5f}};
-        chars['_'] = {{0,0, 1,0}};
-        
+        chars['-'] = {{0.2f, 0.5f, 0.8f, 0.5f}};
+        chars['_'] = {{0, 0, 1, 0}};
+
         initialized = true;
     }
-    
+
     static std::vector<CharSegment> empty;
     char upper = std::toupper(c);
     auto it = chars.find(upper);
     return (it != chars.end()) ? it->second : empty;
 }
 
-static void DrawBillboardText(const glm::vec3& pos, const std::string& text,
-                              float size, const glm::vec3& right, const glm::vec3& up) {
-    if (text.empty()) return;
-    
+static void DrawBillboardText(const glm::vec3 &pos,
+                              const std::string &text,
+                              float size,
+                              const glm::vec3 &right,
+                              const glm::vec3 &up)
+{
+    if (text.empty())
+        return;
+
     float charWidth = size * 0.7f;
     float charSpacing = size * 0.2f;
     float totalWidth = text.length() * (charWidth + charSpacing) - charSpacing;
-    
+
     glm::vec3 startPos = pos - right * (totalWidth * 0.5f);
-    
+
     glLineWidth(1.5f);
     glColor4f(0.8f, 0.8f, 0.85f, 0.7f);
-    
+
     glBegin(GL_LINES);
-    
+
     float currentX = 0.0f;
-    for (char c : text) {
-        const auto& segments = getCharSegments(c);
+    for (char c : text)
+    {
+        const auto &segments = getCharSegments(c);
         glm::vec3 charOrigin = startPos + right * currentX;
-        
-        for (const auto& seg : segments) {
+
+        for (const auto &seg : segments)
+        {
             glm::vec3 p1 = charOrigin + right * (seg.x1 * charWidth) + up * (seg.y1 * size);
             glm::vec3 p2 = charOrigin + right * (seg.x2 * charWidth) + up * (seg.y2 * size);
             glVertex3f(p1.x, p1.y, p1.z);
             glVertex3f(p2.x, p2.y, p2.z);
         }
-        
+
         currentX += charWidth + charSpacing;
     }
-    
+
     glEnd();
 }
 
-static glm::vec3 calculateConstellationCenter(const std::vector<glm::vec3>& starPositions) {
-    if (starPositions.empty()) return glm::vec3(0.0f);
-    
+static glm::vec3 calculateConstellationCenter(const std::vector<glm::vec3> &starPositions)
+{
+    if (starPositions.empty())
+        return glm::vec3(0.0f);
+
     glm::vec3 minPos = starPositions[0];
     glm::vec3 maxPos = starPositions[0];
-    
-    for (const auto& pos : starPositions) {
+
+    for (const auto &pos : starPositions)
+    {
         minPos = glm::min(minPos, pos);
         maxPos = glm::max(maxPos, pos);
     }
-    
+
     return (minPos + maxPos) * 0.5f;
 }
 
-static std::string formatConstellationName(const std::string& name) {
+static std::string formatConstellationName(const std::string &name)
+{
     std::string result;
-    for (char c : name) {
-        if (c == '_') {
+    for (char c : name)
+    {
+        if (c == '_')
+        {
             result += ' ';
-        } else {
+        }
+        else
+        {
             result += std::toupper(c);
         }
     }
     return result;
 }
 
+
 // ==================================
-// Skybox Rendering
+// Constellation Texture Preprocessing
 // ==================================
 
-void DrawSkybox(const glm::vec3& cameraPos, double jd,
-                const glm::vec3& cameraFront, const glm::vec3& cameraUp) {
-    if (!g_skyboxInitialized) {
-        InitializeSkybox(getDefaultsPath());
-    }
-    
-    glDisable(GL_LIGHTING);
-    glDepthMask(GL_FALSE);
-    
-    glPushMatrix();
-    
-    // Center skybox on camera
-    glTranslatef(cameraPos.x, cameraPos.y, cameraPos.z);
-    
-    // Stars are now properly transformed from J2000 equatorial to ecliptic coordinates
-    // in raDecToCartesian(), so no additional rotation is needed here.
-    // The stars form a fixed inertial reference frame for the solar system.
-    
-    // ==================================
-    // Draw stars from Hipparcos catalog
-    // ==================================
-    // Astronomical magnitude is logarithmic: each magnitude step = 2.512x brightness change
-    // flux_ratio = 10^((reference_mag - star_mag) / 2.5)
-    // We use mag 7.0 as our dimmest reference
-    
-    // Reference magnitude for brightness calculations
-    const float REF_MAG = 7.0f;  // Dimmest star we show at minimum brightness
-    const float MIN_BRIGHTNESS = 0.12f;  // Minimum color intensity
-    const float MAX_BRIGHTNESS = 1.0f;   // Maximum color intensity
-    
-    // Calculate brightness from magnitude using proper logarithmic scale
-    auto getMagnitudeBrightness = [](float mag) -> float {
-        // Astronomical flux ratio: 10^((REF_MAG - mag) / 2.5)
-        // Sirius (mag -1.46) vs mag 7 star: ~2500x brighter
-        // We compress this logarithmically for display
-        float fluxRatio = std::pow(10.0f, (7.0f - mag) / 2.5f);
-        // Apply perceptual compression (cube root approximates human brightness perception)
-        float brightness = std::pow(fluxRatio, 0.33f) / std::pow(2512.0f, 0.33f);
-        return glm::clamp(0.12f + brightness * 0.88f, 0.12f, 1.0f);
-    };
-    
-    // Get color temperature based on magnitude (simplified - real depends on spectral type)
-    auto getStarColor = [&getMagnitudeBrightness](float mag, float& r, float& g, float& b) {
-        float brightness = getMagnitudeBrightness(mag);
-        
-        if (mag < -0.5f) {
-            // Very bright stars - blue-white (like Sirius, Vega)
-            r = brightness * 0.92f;
-            g = brightness * 0.96f;
-            b = brightness;
-        } else if (mag < 1.5f) {
-            // Bright stars - white
-            r = brightness;
-            g = brightness * 0.98f;
-            b = brightness * 0.95f;
-        } else if (mag < 3.5f) {
-            // Medium stars - slightly warm
-            r = brightness;
-            g = brightness * 0.95f;
-            b = brightness * 0.88f;
-        } else {
-            // Dim stars - warmer orange tint
-            r = brightness;
-            g = brightness * 0.90f;
-            b = brightness * 0.78f;
-        }
-    };
-    
-    glEnable(GL_POINT_SMOOTH);
-    glHint(GL_POINT_SMOOTH_HINT, GL_NICEST);
-    
-    // Batch stars by magnitude ranges for efficient rendering
-    // Each batch uses a single point size
-    struct MagRange { float min, max, pointSize; };
-    std::vector<MagRange> ranges = {
-        {-2.0f, 0.0f, 6.0f},   // Very bright (Sirius, Canopus, etc.)
-        {0.0f, 1.5f, 4.5f},    // Bright (Vega, Arcturus, etc.)
-        {1.5f, 3.0f, 3.0f},    // Medium-bright
-        {3.0f, 4.5f, 2.2f},    // Medium
-        {4.5f, 5.5f, 1.6f},    // Dim
-        {5.5f, 7.5f, 1.2f}     // Very dim
-    };
-    
-    for (const auto& range : ranges) {
-        glPointSize(range.pointSize);
-        glBegin(GL_POINTS);
-        
-        for (const HipStar& star : g_hipStars) {
-            if (star.magnitude >= range.min && star.magnitude < range.max) {
-                float r, g, b;
-                getStarColor(star.magnitude, r, g, b);
-                glColor3f(r, g, b);
-                
-                double ra, dec;
-                propagateStarPosition(star, jd, ra, dec);
-                glm::vec3 pos = raDecToCartesian(static_cast<float>(ra), static_cast<float>(dec), SKYBOX_RADIUS);
-                glVertex3f(pos.x, pos.y, pos.z);
+// Simple bilinear interpolation resize (similar to EarthMaterial::resizeImage)
+static void resizeConstellationImage(const unsigned char *src,
+                                     int srcW,
+                                     int srcH,
+                                     unsigned char *dst,
+                                     int dstW,
+                                     int dstH,
+                                     int channels)
+{
+    float xRatio = static_cast<float>(srcW) / dstW;
+    float yRatio = static_cast<float>(srcH) / dstH;
+
+    for (int y = 0; y < dstH; y++)
+    {
+        float srcY = y * yRatio;
+        int y0 = static_cast<int>(srcY);
+        int y1 = std::min(y0 + 1, srcH - 1);
+        float yFrac = srcY - y0;
+
+        for (int x = 0; x < dstW; x++)
+        {
+            float srcX = x * xRatio;
+            int x0 = static_cast<int>(srcX);
+            int x1 = std::min(x0 + 1, srcW - 1);
+            float xFrac = srcX - x0;
+
+            for (int c = 0; c < channels; c++)
+            {
+                // Bilinear interpolation
+                float v00 = src[(y0 * srcW + x0) * channels + c];
+                float v10 = src[(y0 * srcW + x1) * channels + c];
+                float v01 = src[(y1 * srcW + x0) * channels + c];
+                float v11 = src[(y1 * srcW + x1) * channels + c];
+
+                float v0 = v00 * (1 - xFrac) + v10 * xFrac;
+                float v1 = v01 * (1 - xFrac) + v11 * xFrac;
+                float value = v0 * (1 - yFrac) + v1 * yFrac;
+
+                dst[(y * dstW + x) * channels + c] = static_cast<unsigned char>(std::clamp(value, 0.0f, 255.0f));
             }
         }
-        
-        glEnd();
-    }
-    
-    glDisable(GL_POINT_SMOOTH);
-    
-    // ==================================
-    // Draw constellation lines and labels (if enabled)
-    // ==================================
-    if (g_showConstellations) {
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glLineWidth(1.0f);
-        glColor4f(0.3f, 0.5f, 0.7f, 0.5f);
-        
-        glBegin(GL_LINES);
-        
-        for (const LoadedConstellation& constellation : g_loadedConstellations) {
-            const auto& stars = constellation.graphStars;
-            
-            for (size_t i = 0; i < stars.size(); i++) {
-                for (size_t j = i + 1; j < stars.size(); j++) {
-                    int rowDiff = std::abs(stars[i].row - stars[j].row);
-                    int colDiff = std::abs(stars[i].col - stars[j].col);
-                    
-                    if (rowDiff <= 2 && colDiff <= 6) {
-                        float ra1, dec1, ra2, dec2;
-                        graphToRaDec(constellation, stars[i].row, stars[i].col, ra1, dec1);
-                        graphToRaDec(constellation, stars[j].row, stars[j].col, ra2, dec2);
-                        
-                        glm::vec3 pos1 = raDecToCartesianHours(ra1, dec1, SKYBOX_RADIUS * 0.997f);
-                        glm::vec3 pos2 = raDecToCartesianHours(ra2, dec2, SKYBOX_RADIUS * 0.997f);
-                        
-                        glVertex3f(pos1.x, pos1.y, pos1.z);
-                        glVertex3f(pos2.x, pos2.y, pos2.z);
-                    }
-                }
-            }
-        }
-        
-        glEnd();
-        
-        // ==================================
-        // Draw constellation labels
-        // ==================================
-        // Since we no longer apply rotation transforms, use camera vectors directly
-        glm::vec3 localCameraRight = glm::normalize(glm::cross(cameraFront, cameraUp));
-        glm::vec3 localCameraUp = glm::normalize(glm::cross(localCameraRight, cameraFront));
-        
-        float labelSize = SKYBOX_RADIUS * 0.012f;
-        
-        for (const LoadedConstellation& constellation : g_loadedConstellations) {
-            if (constellation.graphStars.empty()) continue;
-            
-            std::vector<glm::vec3> starPositions;
-            for (const GraphStar& graphStar : constellation.graphStars) {
-                float ra, dec;
-                graphToRaDec(constellation, graphStar.row, graphStar.col, ra, dec);
-                glm::vec3 pos = raDecToCartesianHours(ra, dec, SKYBOX_RADIUS * 0.99f);
-                starPositions.push_back(pos);
-            }
-            
-            glm::vec3 center = calculateConstellationCenter(starPositions);
-            center = glm::normalize(center) * (SKYBOX_RADIUS * 0.995f);
-            center += localCameraUp * labelSize * 0.5f;
-            
-            std::string displayName = formatConstellationName(constellation.name);
-            DrawBillboardText(center, displayName, labelSize, localCameraRight, localCameraUp);
-        }
-        
-        glDisable(GL_BLEND);
-    }
-    
-    glPopMatrix();
-    
-    glDepthMask(GL_TRUE);
-    glEnable(GL_LIGHTING);
-}
-
-// ==================================
-// Star Texture Generation
-// ==================================
-
-// Always use 8K for star accuracy (8192x4096)
-static const int STAR_TEXTURE_WIDTH = 8192;
-static const int STAR_TEXTURE_HEIGHT = 4096;
-
-// Convert ecliptic longitude/latitude to UV coordinates for equirectangular projection
-static glm::vec2 eclipticToUV(double lon, double lat) {
-    // Longitude: 0 to 2π maps to U: 0 to 1
-    // Latitude: -π/2 to π/2 maps to V: 1 to 0 (flipped for image coordinates)
-    double u = lon / (2.0 * PI);
-    double v = 0.5 - lat / PI;  // Map [-π/2, π/2] to [1, 0]
-    return glm::vec2(static_cast<float>(u), static_cast<float>(v));
-}
-
-// Draw a star at the given ecliptic coordinates into the texture buffer
-// Accounts for equirectangular projection distortion (cos(latitude) factor)
-static void drawStar(std::vector<float>& buffer, int width, int height,
-                     double eclLon, double eclLat, float brightness, int magnitudeClass) {
-    // Convert to UV
-    glm::vec2 uv = eclipticToUV(eclLon, eclLat);
-    
-    // Convert UV to pixel coordinates
-    int centerX = static_cast<int>(uv.x * width) % width;
-    int centerY = static_cast<int>(uv.y * height);
-    
-    // Clamp Y to valid range
-    if (centerY < 0) centerY = 0;
-    if (centerY >= height) centerY = height - 1;
-    
-    // Calculate the cos(latitude) distortion factor for equirectangular
-    // Near poles, horizontal distances are stretched, so we need to compress our drawing
-    double cosLat = std::cos(eclLat);
-    if (cosLat < 0.01) cosLat = 0.01;  // Avoid division by zero at poles
-    
-    // Star rendering: real stars are point sources
-    // Only the very brightest stars (mag < 0) get a tiny halo
-    // Most stars are single pixels
-    
-    // Determine star size based on magnitude class:
-    // 0 = very bright (mag < 0): 2 pixel radius with subtle halo
-    // 1 = bright (mag 0-2): 1-2 pixel radius
-    // 2 = medium (mag 2-4): 1 pixel
-    // 3 = dim (mag 4+): 1 pixel, dimmer
-    
-    int baseRadius;
-    switch (magnitudeClass) {
-        case 0: baseRadius = 2; break;  // Very bright
-        case 1: baseRadius = 1; break;  // Bright
-        default: baseRadius = 0; break; // Medium and dim are single pixels
-    }
-    
-    // For single pixel stars (baseRadius = 0), just set the pixel
-    if (baseRadius == 0) {
-        int idx = (centerY * width + centerX) * 3;
-        buffer[idx + 0] += brightness;
-        buffer[idx + 1] += brightness;
-        buffer[idx + 2] += brightness;
-        return;
-    }
-    
-    // For larger stars, draw with projection-corrected extent
-    // The horizontal extent needs to be divided by cos(lat) to appear circular on the sphere
-    int radiusY = baseRadius;
-    int radiusX = static_cast<int>(std::ceil(baseRadius / cosLat));
-    radiusX = std::min(radiusX, 50);  // Cap to avoid extreme values at poles
-    
-    // Draw with Gaussian PSF (Point Spread Function)
-    float sigma = static_cast<float>(baseRadius) * 0.6f;
-    
-    for (int dy = -radiusY; dy <= radiusY; ++dy) {
-        for (int dx = -radiusX; dx <= radiusX; ++dx) {
-            int px = (centerX + dx + width) % width;  // Wrap horizontally
-            int py = centerY + dy;
-            
-            if (py < 0 || py >= height) continue;
-            
-            // Calculate angular distance accounting for projection
-            // dx pixels = dx * cos(lat) in angular terms
-            float angularDx = dx * static_cast<float>(cosLat);
-            float dist = std::sqrt(angularDx * angularDx + static_cast<float>(dy * dy));
-            
-            // Gaussian PSF
-            float falloff = std::exp(-(dist * dist) / (2.0f * sigma * sigma));
-            
-            int idx = (py * width + px) * 3;
-            float intensity = brightness * falloff;
-            buffer[idx + 0] += intensity;
-            buffer[idx + 1] += intensity;
-            buffer[idx + 2] += intensity;
-        }
     }
 }
 
-int GenerateStarTexture(const std::string& defaultsPath,
-                        const std::string& outputPath,
-                        TextureResolution resolution,
-                        double jd) {
-    // Initialize skybox first to load star catalog
-    if (!g_skyboxInitialized) {
-        InitializeSkybox(defaultsPath);
-    }
-    
-    if (g_hipStars.empty()) {
-        std::cerr << "No stars loaded, cannot generate star texture" << std::endl;
-        return -1;
-    }
-    
-    // Always use 8K for accurate star rendering
-    const int width = STAR_TEXTURE_WIDTH;
-    const int height = STAR_TEXTURE_HEIGHT;
-    
-    std::cout << "=== Star Texture Generation ===" << std::endl;
-    std::cout << "Resolution: " << width << "x" << height << " (8K fixed for accuracy)" << std::endl;
-    std::cout << "Stars to render: " << g_hipStars.size() << std::endl;
-    
-    // Create output directory - always use "8k" folder
-    std::string outputDir = outputPath + "/8k";
-    std::filesystem::create_directories(outputDir);
-    
-    std::string outputFile = outputDir + "/stars.png";  // PNG for quality
-    
-    // Check if already exists
-    if (std::filesystem::exists(outputFile)) {
-        std::cout << "Star texture already exists: " << outputFile << std::endl;
-        return static_cast<int>(g_hipStars.size());
-    }
-    
-    // Create HDR buffer (float for accumulation - allows multiple stars to add up)
-    std::vector<float> hdrBuffer(width * height * 3, 0.0f);
-    
-    // Astronomical magnitude reference: 
-    // Sirius = -1.46 mag (brightest star)
-    // Limit of naked eye = ~6.5 mag
-    // Hipparcos catalog goes to ~7 mag
-    const float REF_MAG = 7.0f;  // Reference (dimmest we show)
-    
-    // Render each star
-    int starsRendered = 0;
-    for (const HipStar& star : g_hipStars) {
-        // Propagate star position to target date
-        double ra, dec;
-        propagateStarPosition(star, jd, ra, dec);
-        
-        // Transform J2000 equatorial -> J2000 ecliptic coordinates
-        double x_eq = cos(dec) * cos(ra);
-        double y_eq = cos(dec) * sin(ra);
-        double z_eq = sin(dec);
-        
-        double cosObl = cos(OBLIQUITY_J2000_RAD);
-        double sinObl = sin(OBLIQUITY_J2000_RAD);
-        
-        double x_ecl = x_eq;
-        double y_ecl = cosObl * y_eq + sinObl * z_eq;
-        double z_ecl = -sinObl * y_eq + cosObl * z_eq;
-        
-        // Convert ecliptic Cartesian back to spherical (longitude, latitude)
-        double eclLon = std::atan2(y_ecl, x_ecl);  // -π to π
-        double eclLat = std::asin(z_ecl);           // -π/2 to π/2
-        
-        // Normalize longitude to 0-2π
-        if (eclLon < 0) eclLon += 2.0 * PI;
-        
-        // Calculate brightness from magnitude using astronomical formula
-        // Flux ratio = 10^((ref_mag - star_mag) / 2.5)
-        // Sirius (-1.46) vs mag 7: ratio = 10^(8.46/2.5) = ~2400x
-        float fluxRatio = std::pow(10.0f, (REF_MAG - star.magnitude) / 2.5f);
-        
-        // Apply perceptual compression - human eye responds logarithmically
-        // Use fourth root for reasonable dynamic range in output
-        float brightness = std::pow(fluxRatio, 0.25f);  
-        brightness = brightness * 0.3f;  // Scale down so dim stars are ~0.3, bright ~3.0
-        
-        // Determine magnitude class for star size
-        int magClass;
-        if (star.magnitude < 0) {
-            magClass = 0;       // Very bright (Sirius, Canopus, etc.) - 2px radius
-        } else if (star.magnitude < 2) {
-            magClass = 1;       // Bright (Vega, Arcturus, etc.) - 1px radius  
-        } else if (star.magnitude < 4) {
-            magClass = 2;       // Medium - single pixel
-        } else {
-            magClass = 3;       // Dim - single pixel, dimmer
-        }
-        
-        // Draw the star with proper projection correction
-        drawStar(hdrBuffer, width, height, eclLon, eclLat, brightness, magClass);
-        starsRendered++;
-    }
-    
-    std::cout << "Stars rendered: " << starsRendered << std::endl;
-    
-    // Tone map HDR buffer to LDR (0-255)
-    std::vector<unsigned char> ldrBuffer(width * height * 3);
-    
-    // Find max value for normalization reference
-    float maxVal = 0.0f;
-    for (float v : hdrBuffer) maxVal = std::max(maxVal, v);
-    std::cout << "Max HDR value: " << maxVal << std::endl;
-    
-    // Apply simple tone mapping: clamp with slight boost for visibility
-    for (int i = 0; i < width * height * 3; ++i) {
-        float hdr = hdrBuffer[i];
-        // Simple S-curve for better contrast
-        float ldr = hdr / (0.5f + hdr);  // Soft knee at 0.5
-        // Boost overall brightness slightly
-        ldr *= 1.5f;
-        // Clamp
-        ldr = std::min(ldr, 1.0f);
-        ldrBuffer[i] = static_cast<unsigned char>(std::min(255.0f, ldr * 255.0f));
-    }
-    
-    // Save as PNG (lossless for star quality)
-    int result = stbi_write_png(outputFile.c_str(), width, height, 3, ldrBuffer.data(), width * 3);
-    
-    if (result) {
-        std::cout << "Star texture saved: " << outputFile << std::endl;
-    } else {
-        std::cerr << "Failed to save star texture: " << outputFile << std::endl;
-        return -1;
-    }
-    
-    return starsRendered;
+// Legacy function - now calls the new preprocessing function
+bool PreprocessConstellationTexture(const std::string &defaultsPath,
+                                    const std::string &outputPath,
+                                    TextureResolution resolution)
+{
+    return PreprocessSkyboxTextures(defaultsPath, outputPath, resolution);
 }
 
-bool InitializeStarTextureMaterial(const std::string& texturePath, TextureResolution /* resolution */) {
-    if (g_starTextureReady) {
-        return true;
+
+// Helper function to load a texture (supports JPG, PNG, TIF)
+// Handles both RGB (3 channels) and RGBA (4 channels) for PNG transparency
+static GLuint loadTextureFile(const std::string &filepath, bool &success)
+{
+    success = false;
+
+    if (!std::filesystem::exists(filepath))
+    {
+        return 0;
     }
-    
-    // Always use 8K star texture for accuracy
-    std::string filepath = texturePath + "/8k/stars.png";
-    
-    std::cout << "Loading star texture: " << filepath << std::endl;
-    
-    // Load the texture
+
     int width, height, channels;
-    unsigned char* data = stbi_load(filepath.c_str(), &width, &height, &channels, 3);
-    
-    if (!data) {
-        std::cerr << "Failed to load star texture: " << filepath << std::endl;
-        return false;
+    // Load with 0 channels to get the actual number of channels from the file
+    // This allows PNG files with alpha to be loaded as RGBA
+    unsigned char *data = stbi_load(filepath.c_str(), &width, &height, &channels, 0);
+
+    if (!data)
+    {
+        std::cerr << "Failed to load texture: " << filepath << " - " << stbi_failure_reason() << std::endl;
+        return 0;
     }
-    
-    // Generate OpenGL texture
-    glGenTextures(1, &g_starTexture);
-    glBindTexture(GL_TEXTURE_2D, g_starTexture);
-    
-    // Set texture parameters
+
+    std::cout << "  Loaded texture: " << width << "x" << height << " (" << channels << " channels)" << std::endl;
+
+    GLuint textureId;
+    glGenTextures(1, &textureId);
+    glBindTexture(GL_TEXTURE_2D, textureId);
+
+    // Use GL_REPEAT for S (U) coordinate to allow seamless horizontal wrapping
+    // Keep GL_CLAMP_TO_EDGE for T (V) coordinate to prevent vertical wrapping
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    
-    // Upload texture data
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
-    
+
+    // Handle both RGB (3 channels) and RGBA (4 channels)
+    if (channels == 4)
+    {
+        // RGBA texture with alpha channel
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    }
+    else
+    {
+        // RGB texture (no alpha) - convert to RGBA if needed, or use RGB
+        // For compatibility, we'll use RGB for 3-channel images
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+    }
+
     stbi_image_free(data);
-    
-    g_starTextureWidth = width;
-    g_starTextureHeight = height;
-    g_starTextureReady = true;
-    
-    std::cout << "Star texture loaded: " << width << "x" << height << std::endl;
-    
-    return true;
+    success = true;
+
+    return textureId;
 }
 
-bool IsStarTextureReady() {
+// Helper function to load an EXR/HDR file (float format)
+static GLuint loadEXRFile(const std::string &filepath, bool &success)
+{
+    success = false;
+
+    if (!std::filesystem::exists(filepath))
+    {
+        return 0;
+    }
+
+    int width, height, channels;
+    float *data = stbi_loadf(filepath.c_str(), &width, &height, &channels, 3);
+
+    if (!data)
+    {
+        std::cerr << "Failed to load EXR/HDR file: " << filepath << " - " << stbi_failure_reason() << std::endl;
+        std::cerr << "  Note: stbi_loadf may not support EXR format, only HDR" << std::endl;
+        return 0;
+    }
+
+    std::cout << "  Loaded EXR/HDR: " << width << "x" << height << " (" << channels << " channels)" << std::endl;
+
+    GLuint textureId;
+    glGenTextures(1, &textureId);
+    glBindTexture(GL_TEXTURE_2D, textureId);
+
+    // Use GL_REPEAT for S (U) coordinate to allow seamless horizontal wrapping
+    // Keep GL_CLAMP_TO_EDGE for T (V) coordinate to prevent vertical wrapping
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    // Upload as RGB32F (3-channel float) for HDR/EXR data
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, data);
+
+    stbi_image_free(data);
+    success = true;
+
+    return textureId;
+}
+
+// Initialize the star texture material (load pre-generated texture into OpenGL)
+// texturePath: path to the output/cache folder (e.g., "celestial-skybox")
+//              This is where PreprocessSkyboxTextures writes processed files
+//              NOT the source directory (defaults/celestial-skybox)
+bool InitializeStarTextureMaterial(const std::string &texturePath, TextureResolution resolution)
+{
+    if (g_starTextureReady)
+    {
+        return true;
+    }
+
+    // Load from output/cache directory: celestial-skybox/[resolution]/
+    // (not from defaults/celestial-skybox which is the source directory)
+    std::string resolutionFolder = getResolutionFolderName(resolution);
+    std::string basePath = texturePath + "/" + resolutionFolder;
+
+    std::cout << "Loading celestial skybox textures from cache: " << basePath << std::endl;
+
+    // Load combined Milky Way + Hiptyc HDR texture (pre-combined additively during preprocessing)
+    std::string combinedPath = basePath + "/milkyway_combined.hdr";
+    if (!std::filesystem::exists(combinedPath))
+    {
+        // Fallback to separate files if combined doesn't exist (backward compatibility)
+        std::string milkywayPath = basePath + "/milkyway_2020.hdr";
+        if (!std::filesystem::exists(milkywayPath))
+        {
+            milkywayPath = basePath + "/milkyway_2020.exr";
+        }
+        g_milkywayTexture = loadEXRFile(milkywayPath, g_milkywayReady);
+        if (g_milkywayReady)
+        {
+            std::cout << "  Milky Way texture loaded: " << milkywayPath << std::endl;
+            g_starTexture = g_milkywayTexture; // Use Milky Way as base texture
+            g_starTextureReady = true;
+        }
+
+        // Load Hiptyc stars EXR texture (second layer)
+        std::string hiptycPath = basePath + "/hiptyc_2020.hdr";
+        if (!std::filesystem::exists(hiptycPath))
+        {
+            hiptycPath = basePath + "/hiptyc_2020.exr";
+        }
+        g_hiptycTexture = loadEXRFile(hiptycPath, g_hiptycReady);
+        if (g_hiptycReady)
+        {
+            std::cout << "  Hiptyc stars texture loaded: " << hiptycPath << std::endl;
+        }
+    }
+    else
+    {
+        // Load combined texture
+        g_milkywayTexture = loadEXRFile(combinedPath, g_milkywayReady);
+        if (g_milkywayReady)
+        {
+            std::cout << "  Combined Milky Way + Hiptyc texture loaded: " << combinedPath << std::endl;
+            g_starTexture = g_milkywayTexture; // Use combined texture as base
+            g_starTextureReady = true;
+            // Set hiptyc as ready too so rendering code knows we have the combined texture
+            g_hiptycReady = true;
+            g_hiptycTexture = g_milkywayTexture; // Same texture
+        }
+    }
+
+    // Load celestial grid texture (third layer) - PNG with transparency
+    std::string gridPath = basePath + "/celestial_grid.png";
+    if (!std::filesystem::exists(gridPath))
+    {
+        gridPath = basePath + "/celestial_grid.jpg"; // Fallback to JPG
+    }
+    if (!std::filesystem::exists(gridPath))
+    {
+        gridPath = basePath + "/grid.png"; // Alternative name
+    }
+    g_constellationGridTexture = loadTextureFile(gridPath, g_constellationGridReady);
+    if (g_constellationGridReady)
+    {
+        std::cout << "  Celestial grid texture loaded: " << gridPath << std::endl;
+    }
+
+    // Load constellation figures texture (fourth layer) - PNG with transparency
+    std::string figuresPath = basePath + "/constellation_figures.png";
+    if (!std::filesystem::exists(figuresPath))
+    {
+        figuresPath = basePath + "/constellation_figures.jpg"; // Fallback to JPG
+    }
+    g_constellationFiguresTexture = loadTextureFile(figuresPath, g_constellationFiguresReady);
+    if (g_constellationFiguresReady)
+    {
+        std::cout << "  Constellation figures texture loaded: " << figuresPath << std::endl;
+    }
+
+    // Load constellation bounds texture (top layer) - PNG with transparency
+    std::string boundsPath = basePath + "/constellation_bounds.png";
+    if (!std::filesystem::exists(boundsPath))
+    {
+        boundsPath = basePath + "/constellation_bounds.jpg"; // Fallback to JPG
+    }
+    if (!std::filesystem::exists(boundsPath))
+    {
+        boundsPath = basePath + "/bounds.png"; // Alternative name
+    }
+    g_constellationBoundsTexture = loadTextureFile(boundsPath, g_constellationBoundsReady);
+    if (g_constellationBoundsReady)
+    {
+        std::cout << "  Constellation bounds texture loaded: " << boundsPath << std::endl;
+    }
+
+    // If we didn't load Milky Way, try to use Hiptyc as fallback
+    if (!g_starTextureReady && g_hiptycReady)
+    {
+        g_starTexture = g_hiptycTexture;
+        g_starTextureReady = true;
+        std::cout << "  Using Hiptyc stars as base texture" << std::endl;
+    }
+
+    // If still no texture, try constellation figures as last resort
+    if (!g_starTextureReady && g_constellationFiguresReady)
+    {
+        g_starTexture = g_constellationFiguresTexture;
+        g_starTextureReady = true;
+        std::cout << "  Using constellation figures as base texture" << std::endl;
+    }
+
+    if (g_starTextureReady)
+    {
+        std::cout << "Celestial skybox textures initialized successfully" << std::endl;
+        std::cout << "  Base texture ID: " << g_starTexture << std::endl;
+        std::cout << "  Milky Way ready: " << (g_milkywayReady ? "yes" : "no") << std::endl;
+        std::cout << "  Hiptyc stars ready: " << (g_hiptycReady ? "yes" : "no") << std::endl;
+        std::cout << "  Celestial grid ready: " << (g_constellationGridReady ? "yes" : "no") << std::endl;
+        std::cout << "  Constellation figures ready: " << (g_constellationFiguresReady ? "yes" : "no") << std::endl;
+        std::cout << "  Constellation bounds ready: " << (g_constellationBoundsReady ? "yes" : "no") << std::endl;
+
+        // Initialize skybox shader for HDR rendering
+        initializeSkyboxShader();
+
+        return true;
+    }
+    else
+    {
+        std::cerr << "Failed to load any celestial skybox textures from: " << basePath << std::endl;
+        std::cerr
+            << "  Expected files: milkyway_combined.hdr (or milkyway_2020.hdr/exr + hiptyc_2020.hdr/exr), "
+               "celestial_grid.png (or .jpg), constellation_figures.png (or .jpg), constellation_bounds.png (or .jpg)"
+            << std::endl;
+        return false;
+    }
+}
+
+bool IsStarTextureReady()
+{
     return g_starTextureReady;
 }
 
-void DrawSkyboxTextured(const glm::vec3& cameraPos) {
-    if (!g_starTextureReady) {
+// Helper function to draw the skybox sphere with a given texture
+// This is called multiple times to layer textures
+static void drawSkyboxSphere(const glm::vec3 &cameraPos, GLuint textureId)
+{
+    if (textureId == 0)
         return;
-    }
-    
-    glDisable(GL_LIGHTING);
-    glDepthMask(GL_FALSE);
-    glEnable(GL_TEXTURE_2D);
-    
-    glBindTexture(GL_TEXTURE_2D, g_starTexture);
-    
-    // Set emissive material (self-luminous, not affected by lighting)
-    GLfloat emission[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    GLfloat black[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, emission);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, black);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, black);
-    
-    glColor3f(1.0f, 1.0f, 1.0f);
-    
+
+    glBindTexture(GL_TEXTURE_2D, textureId);
+
     glPushMatrix();
     glTranslatef(cameraPos.x, cameraPos.y, cameraPos.z);
-    
-    // Draw textured sphere (inside-out for skybox)
-    // High resolution for smooth rendering of 8K texture
-    const int slices = 128;
-    const int stacks = 64;
+
+    // Draw textured sphere (inside-out for skybox, normals face inward)
+    // Very low resolution for skybox - it's very far away and fragment shader handles precision
+    // Target: ~128 total triangles (8 slices × 8 stacks × 2 triangles per quad = 128 triangles)
+    const int slices = 8;
+    const int stacks = 8;
     const float radius = SKYBOX_RADIUS;
-    
-    // UV mapping must match texture generation (eclipticToUV):
-    // U = eclLon / 2π  (longitude 0 to 2π maps to U 0 to 1)
-    // V = 0.5 - eclLat / π  (north pole V=0, equator V=0.5, south pole V=1)
-    
-    for (int i = 0; i < stacks; ++i) {
-        // phi is latitude from -π/2 (south) to +π/2 (north)
+
+    // UV mapping for constellation texture (equatorial coordinates, plate carrée projection):
+    // Texture is centered at 0h RA, R.A. increases to the left
+    // U = 0.5 - (RA / 24h) where RA is in hours (0-24)
+    // V = 0.5 - (Dec / 180°) where Dec is in degrees (-90 to +90)
+    // The sphere is drawn in ecliptic coordinates, so we need to convert to equatorial for UV mapping
+
+    for (int i = 0; i < stacks; ++i)
+    {
+        // phi is ecliptic latitude from -π/2 (south) to +π/2 (north)
         float phi1 = static_cast<float>(PI) * (-0.5f + static_cast<float>(i) / stacks);
         float phi2 = static_cast<float>(PI) * (-0.5f + static_cast<float>(i + 1) / stacks);
-        
+
         float y1 = radius * sin(phi1);
         float y2 = radius * sin(phi2);
         float r1 = radius * cos(phi1);
         float r2 = radius * cos(phi2);
-        
-        // V coordinates - must match eclipticToUV: v = 0.5 - lat/π
-        // At phi = -π/2 (south): v = 0.5 + 0.5 = 1
-        // At phi = +π/2 (north): v = 0.5 - 0.5 = 0
-        float v1 = 0.5f - phi1 / static_cast<float>(PI);
-        float v2 = 0.5f - phi2 / static_cast<float>(PI);
-        
+
         glBegin(GL_TRIANGLE_STRIP);
-        for (int j = 0; j <= slices; ++j) {
-            // theta is longitude from 0 to 2π
+        for (int j = 0; j <= slices; ++j)
+        {
+            // theta is ecliptic longitude from 0 to 2π
             float theta = 2.0f * static_cast<float>(PI) * static_cast<float>(j) / slices;
             float cosTheta = cos(theta);
             float sinTheta = sin(theta);
-            
-            // U coordinate - must match eclipticToUV: u = eclLon / 2π
-            // Theta=0 should map to U=0 (vernal equinox direction: +X)
-            // For inside view, we need to reverse since we're looking inward
-            float u = 1.0f - static_cast<float>(j) / slices;
-            
-            // Convert from spherical to Cartesian:
+
+            // Convert ecliptic coordinates to Cartesian (ecliptic frame)
+            float x_ecl = cos(phi1) * cosTheta;
+            float y_ecl = cos(phi1) * sinTheta;
+            float z_ecl = sin(phi1);
+
+            // Convert from ecliptic to equatorial coordinates (inverse of the transformation in raDecToCartesian)
+            // Ecliptic -> Equatorial rotation around X-axis by -obliquity
+            double cosObl = cos(OBLIQUITY_J2000_RAD);
+            double sinObl = sin(OBLIQUITY_J2000_RAD);
+
+            // Inverse rotation: [x_eq]   [ 1    0       0     ]   [x_ecl]
+            //                  [y_eq] = [ 0  cos(ε) -sin(ε) ] * [y_ecl]
+            //                  [z_eq]   [ 0  sin(ε)  cos(ε) ]   [z_ecl]
+            double x_eq = x_ecl;
+            double y_eq = cosObl * y_ecl - sinObl * z_ecl;
+            double z_eq = sinObl * y_ecl + cosObl * z_ecl;
+
+            // Convert equatorial Cartesian to RA/Dec
+            double ra = std::atan2(y_eq, x_eq); // -π to π
+            double dec = std::asin(z_eq);       // -π/2 to π/2
+
+            // Normalize RA to 0-2π, then convert to hours (0-24)
+            if (ra < 0)
+                ra += 2.0 * PI;
+            double raHours = ra * 12.0 / PI; // Convert radians to hours (2π rad = 24h)
+
+            // Convert Dec from radians to degrees
+            double decDeg = dec * 180.0 / PI;
+
+            // Map to UV coordinates for constellation texture
+            // U: center (0h RA) is at U=0.5, R.A. increases to the left
+            float u = 0.5f - static_cast<float>(raHours / 24.0);
+            // Don't clamp U - allow it to extend beyond [0,1] for seamless blending
+            // The shader will detect when we're near the seam (within 0.05 of edges)
+            // and blend between both sides. We allow U to go slightly beyond the blend zone
+            // to ensure the shader can always sample both sides when needed
+            // No wrapping here - let the shader handle the blending
+            // U can be in range [-0.1, 1.1] to give shader room to blend
+
+            // V: Dec -90° to +90° maps to V: 1 to 0
+            // Keep V clamped since we don't want vertical wrapping
+            float v1 = 0.5f - static_cast<float>(decDeg / 180.0);
+            v1 = std::clamp(v1, 0.0f, 1.0f);
+
+            // Calculate for phi2 as well
+            float x_ecl2 = cos(phi2) * cosTheta;
+            float y_ecl2 = cos(phi2) * sinTheta;
+            float z_ecl2 = sin(phi2);
+
+            double x_eq2 = x_ecl2;
+            double y_eq2 = cosObl * y_ecl2 - sinObl * z_ecl2;
+            double z_eq2 = sinObl * y_ecl2 + cosObl * z_ecl2;
+
+            double ra2 = std::atan2(y_eq2, x_eq2);
+            double dec2 = std::asin(z_eq2);
+
+            if (ra2 < 0)
+                ra2 += 2.0 * PI;
+            double raHours2 = ra2 * 12.0 / PI;
+            double decDeg2 = dec2 * 180.0 / PI;
+
+            float u2 = 0.5f - static_cast<float>(raHours2 / 24.0);
+            // Same seamless blending for u2 - shader handles the blending
+
+            float v2 = 0.5f - static_cast<float>(decDeg2 / 180.0);
+            v2 = std::clamp(v2, 0.0f, 1.0f);
+
+            // Convert from spherical to Cartesian for display:
             // In ecliptic: X = r*cos(lat)*cos(lon), Y = r*cos(lat)*sin(lon), Z = r*sin(lat)
             // In display (Y-up): X_disp = X_ecl, Y_disp = Z_ecl, Z_disp = -Y_ecl
-            
+
             // First vertex (at phi1)
-            float x1 = r1 * cosTheta;                  // ecliptic X
-            float z1_ecl = r1 * sinTheta;              // ecliptic Y
+            float x1 = r1 * cosTheta;     // ecliptic X
+            float z1_ecl = r1 * sinTheta; // ecliptic Y
             glTexCoord2f(u, v1);
-            glNormal3f(-cosTheta * cos(phi1), -sin(phi1), sinTheta * cos(phi1));  // Inward normal
-            glVertex3f(x1, y1, -z1_ecl);               // Y_disp = Y_ecl_z = y1, Z_disp = -Y_ecl
-            
+            // No normals needed - lighting is disabled for skybox
+            // Setting normals can cause visual artifacts even when lighting is off
+            glVertex3f(x1, y1, -z1_ecl); // Y_disp = Y_ecl_z = y1, Z_disp = -Y_ecl
+
             // Second vertex (at phi2)
             float x2 = r2 * cosTheta;
             float z2_ecl = r2 * sinTheta;
-            glTexCoord2f(u, v2);
-            glNormal3f(-cosTheta * cos(phi2), -sin(phi2), sinTheta * cos(phi2));
+            glTexCoord2f(u2, v2);
+            // No normals needed - lighting is disabled for skybox
             glVertex3f(x2, y2, -z2_ecl);
         }
         glEnd();
+
+        // Count triangles: TRIANGLE_STRIP with (slices+1)*2 vertices = (slices+1)*2 - 2 triangles
+        CountTriangles(GL_TRIANGLE_STRIP, (slices + 1) * 2);
     }
-    
+
     glPopMatrix();
-    
-    // Reset material
-    GLfloat noEmission[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, noEmission);
-    
-    glDisable(GL_TEXTURE_2D);
-    glDepthMask(GL_TRUE);
-    glEnable(GL_LIGHTING);
+}
+
+void DrawSkyboxTextured(const glm::vec3 &cameraPos)
+{
+    if (!g_starTextureReady)
+    {
+        // Try to draw with any available texture
+        if (!g_milkywayReady && !g_hiptycReady && !g_constellationFiguresReady)
+        {
+            return; // No textures available
+        }
+    }
+
+    // Use shader-based rendering for HDR textures
+    // Fall back to fixed-function if shader not available
+    bool useShader = g_skyboxShaderReady && g_skyboxShaderProgram != 0;
+
+    // Save OpenGL state that we'll modify
+    GLboolean cullFaceEnabled = glIsEnabled(GL_CULL_FACE);
+    GLboolean lightingEnabled = glIsEnabled(GL_LIGHTING);
+    GLboolean depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean depthMaskEnabled;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMaskEnabled);
+    GLboolean blendEnabled = glIsEnabled(GL_BLEND);
+    GLboolean texture2DEnabled = glIsEnabled(GL_TEXTURE_2D);
+
+    // Save blend function
+    GLint blendSrc, blendDst;
+    glGetIntegerv(GL_BLEND_SRC, &blendSrc);
+    glGetIntegerv(GL_BLEND_DST, &blendDst);
+
+    // Save current shader program
+    GLint currentProgram = 0;
+#ifndef GL_CURRENT_PROGRAM
+#define GL_CURRENT_PROGRAM 0x8B8D
+#endif
+    glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+
+    glDisable(GL_LIGHTING);
+    glDisable(GL_CULL_FACE);  // Disable culling for inside-out sphere
+    glDisable(GL_DEPTH_TEST); // Disable depth testing so layers don't occlude each other
+    glDepthMask(GL_FALSE);    // Don't write to depth buffer
+    glEnable(GL_TEXTURE_2D);
+
+    // Set white color for unlit texture (no material properties needed)
+    glColor3f(1.0f, 1.0f, 1.0f);
+
+    if (useShader)
+    {
+        // Use shader program for HDR texture support
+        glUseProgram(g_skyboxShaderProgram);
+
+        // Set texture unit (GL_TEXTURE0)
+        if (g_skyboxUniformTexture >= 0)
+        {
+            glUniform1i(g_skyboxUniformTexture, 0);
+        }
+
+        // Set exposure to brighten HDR values for display
+        // HDR files often have low values (< 1.0) that need scaling to be visible
+        if (g_skyboxUniformExposure >= 0)
+        {
+            glUniform1f(g_skyboxUniformExposure, 5.0f); // No scaling - use HDR values as-is
+        }
+
+        glActiveTexture_ptr(GL_TEXTURE0);
+    }
+    else
+    {
+        // Fallback to fixed-function pipeline
+        glUseProgram(0);
+        glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    }
+
+    // Layer textures in order (bottom to top):
+    // 1. Combined Milky Way + Hiptyc (pre-combined additively during preprocessing)
+    //    If combined texture exists, use it. Otherwise fall back to separate textures.
+    if (g_milkywayReady && g_milkywayTexture != 0)
+    {
+        glDisable(GL_BLEND); // No blending needed for base layer
+        if (useShader && g_skyboxUniformUseAdditive >= 0)
+        {
+            glUniform1i(g_skyboxUniformUseAdditive, 0); // false - not additive
+        }
+        drawSkyboxSphere(cameraPos, g_milkywayTexture);
+
+        // Only render hiptyc separately if we don't have the combined texture
+        // (check if hiptyc texture is different from milkyway texture)
+        if (g_hiptycReady && g_hiptycTexture != 0 && g_hiptycTexture != g_milkywayTexture)
+        {
+            // Separate hiptyc texture exists - render additively on top
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE); // Additive blending for second layer
+            if (useShader && g_skyboxUniformUseAdditive >= 0)
+            {
+                glUniform1i(g_skyboxUniformUseAdditive, 1); // true - additive blending
+            }
+            drawSkyboxSphere(cameraPos, g_hiptycTexture);
+        }
+    }
+
+    // 3. Celestial grid (third layer) - PNG with alpha transparency
+    // Use additive blending: black pixels add nothing, colored pixels add their color
+    if (g_showCelestialGrid && g_constellationGridReady && g_constellationGridTexture != 0)
+    {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE); // Additive blending - shader multiplies by alpha
+        if (useShader && g_skyboxUniformUseAdditive >= 0)
+        {
+            glUniform1i(g_skyboxUniformUseAdditive, 1); // true - additive blending with alpha
+        }
+        drawSkyboxSphere(cameraPos, g_constellationGridTexture);
+    }
+
+    // 4. Constellation figures (fourth layer) - PNG with alpha transparency
+    if (g_showConstellationFigures && g_constellationFiguresReady && g_constellationFiguresTexture != 0)
+    {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE); // Additive blending - shader multiplies by alpha
+        if (useShader && g_skyboxUniformUseAdditive >= 0)
+        {
+            glUniform1i(g_skyboxUniformUseAdditive, 1); // true - additive blending with alpha
+        }
+        drawSkyboxSphere(cameraPos, g_constellationFiguresTexture);
+    }
+
+    // 5. Constellation bounds (top layer) - PNG with alpha transparency
+    if (g_showConstellationBounds && g_constellationBoundsReady && g_constellationBoundsTexture != 0)
+    {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE); // Additive blending - shader multiplies by alpha
+        if (useShader && g_skyboxUniformUseAdditive >= 0)
+        {
+            glUniform1i(g_skyboxUniformUseAdditive, 1); // true - additive blending with alpha
+        }
+        drawSkyboxSphere(cameraPos, g_constellationBoundsTexture);
+    }
+
+    // Fallback: if no layered textures, use base texture
+    if (!g_milkywayReady && !g_hiptycReady && g_starTextureReady && g_starTexture != 0)
+    {
+        if (useShader && g_skyboxUniformUseAdditive >= 0)
+        {
+            glUniform1i(g_skyboxUniformUseAdditive, 0); // false
+        }
+        drawSkyboxSphere(cameraPos, g_starTexture);
+    }
+
+    // Restore OpenGL state
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Restore previous shader program
+    if (useShader)
+    {
+        glUseProgram(currentProgram);
+    }
+    else
+    {
+        glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE); // Restore default
+    }
+
+    // Restore previous state
+    if (!texture2DEnabled)
+        glDisable(GL_TEXTURE_2D);
+    if (blendEnabled)
+    {
+        glBlendFunc(blendSrc, blendDst); // Restore previous blend function
+    }
+    else
+    {
+        glDisable(GL_BLEND);
+    }
+    glDepthMask(depthMaskEnabled ? GL_TRUE : GL_FALSE);
+    if (depthTestEnabled)
+        glEnable(GL_DEPTH_TEST);
+    if (cullFaceEnabled)
+        glEnable(GL_CULL_FACE);
+    if (lightingEnabled)
+        glEnable(GL_LIGHTING);
+}
+
+// Draw wireframe version of skybox (for wireframe overlay mode)
+void DrawSkyboxWireframe(const glm::vec3 &cameraPos)
+{
+    if (!g_starTextureReady)
+    {
+        // Try to draw with any available texture
+        if (!g_milkywayReady && !g_hiptycReady && !g_constellationFiguresReady)
+        {
+            return; // No textures available
+        }
+    }
+
+    // Render the same geometry as DrawSkyboxTextured but without shaders
+    // This allows glPolygonMode(GL_LINE) to work
+    // Unbind shader (should already be unbound, but be safe)
+    glUseProgram(0);
+
+    // Draw the skybox sphere geometry in wireframe mode
+    // Use the same tessellation as the filled version
+    drawSkyboxSphere(cameraPos, 0); // Pass 0 for texture (we don't need it for wireframe)
 }

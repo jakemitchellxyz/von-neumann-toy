@@ -30,5 +30,8 @@ void DrawMeasureIcon(float x, float y, float size, float r, float g, float b);
 // Draw shoot icon (crosshair/target)
 void DrawShootIcon(float x, float y, float size, float r, float g, float b);
 
+// Draw eye icon (for color picker)
+void DrawEyeIcon(float x, float y, float size, float r, float g, float b);
+
 // Draw crosshair (for shoot mode)
 void DrawCrosshair(float x, float y, float size);

@@ -68,7 +68,8 @@ I think it's a very cool toy for many reasons:
   - Blue Marble Next Generation for Earth's surface color from 2004
   - ETOPO 2022 for Earth's surface elevation (topology) (https://essd.copernicus.org/articles/17/1835/2025/) 
   - NOAA-20 VIIRS Day/Night Band Black Marble At Sensor Radiance for city lights
-  - Terra MODIS 3-6-7 Corrected Reflectance for earth surface albedo
+  - Terra MODIS 3-6-7 Corrected Reflectance for earth surface reflectance
+  - RSS CCMP 6-Hourly 10 Meter Surface Winds Level 4 Version 3.1 for wind patterns
 - Decentralized Zero-Knowledge-Proof Consensus Algorithms
 - State Machines, Decision Trees, Knowledge Graphs
 - 3D Graphics Rendering (Projection math, coordinate systems)
@@ -108,3 +109,8 @@ Parts:
 
 It's "mental model"
 - 
+
+# Rendering Logic
+- signed distance field for all celestial objects and rigid bodies
+- cone marching with SDF
+- Physics Based Rendering (PBRs)

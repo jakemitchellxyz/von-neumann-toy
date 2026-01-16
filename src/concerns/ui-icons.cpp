@@ -191,6 +191,45 @@ void DrawShootIcon(float x, float y, float size, float r, float g, float b)
     glLineWidth(1.0f);
 }
 
+// Draw eye icon (for color picker)
+void DrawEyeIcon(float x, float y, float size, float r, float g, float b)
+{
+    glColor3f(r, g, b);
+    glLineWidth(2.0f);
+
+    float centerX = x + size * 0.5f;
+    float centerY = y + size * 0.5f;
+    float eyeWidth = size * 0.6f;
+    float eyeHeight = size * 0.4f;
+    float pupilSize = size * 0.15f;
+
+    // Draw eye outline (ellipse)
+    glBegin(GL_LINE_LOOP);
+    int segments = 16;
+    for (int i = 0; i < segments; i++)
+    {
+        float angle = (i / static_cast<float>(segments)) * 2.0f * 3.14159f;
+        float px = centerX + cos(angle) * eyeWidth * 0.5f;
+        float py = centerY + sin(angle) * eyeHeight * 0.5f;
+        glVertex2f(px, py);
+    }
+    glEnd();
+
+    // Draw pupil (filled circle in center)
+    glBegin(GL_TRIANGLE_FAN);
+    glVertex2f(centerX, centerY); // Center
+    for (int i = 0; i <= segments; i++)
+    {
+        float angle = (i / static_cast<float>(segments)) * 2.0f * 3.14159f;
+        float px = centerX + cos(angle) * pupilSize * 0.5f;
+        float py = centerY + sin(angle) * pupilSize * 0.5f;
+        glVertex2f(px, py);
+    }
+    glEnd();
+
+    glLineWidth(1.0f);
+}
+
 // Draw crosshair (for shoot mode)
 void DrawCrosshair(float x, float y, float size)
 {

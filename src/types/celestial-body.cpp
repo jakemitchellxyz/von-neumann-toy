@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "celestial-body.h"
+#include "dynamic-lod-sphere.h"
 #include "../concerns/constants.h"
 #include "../concerns/solar-lighting.h"
 #include "../concerns/spice-ephemeris.h"
@@ -68,13 +69,23 @@ void CelestialBody::draw(double julianDate, const glm::vec3 &cameraPos) const
         else
         {
             // Draw with solar lighting and proper SPICE-derived orientation
-            SolarLighting::drawOrientedLitSphere(position,
-                                                 displayRadius,
-                                                 color,
-                                                 poleDirection,
-                                                 primeMeridianDirection,
-                                                 32,
-                                                 16);
+            // Use DynamicLODSphere for adaptive tessellation and occlusion culling
+            extern bool g_showWireframe;
+            
+            // Get camera info (use global if not provided)
+            glm::vec3 actualCameraPos = cameraPos;
+            glm::vec3 actualCameraDir = SolarLighting::getCameraDirection();
+            float actualFov = SolarLighting::getCameraFov();
+            
+            // Render using DynamicLODSphere with adaptive tessellation
+            DynamicLODSphere::draw(position,
+                                   displayRadius,
+                                   poleDirection,
+                                   primeMeridianDirection,
+                                   actualCameraPos,
+                                   actualCameraDir,
+                                   actualFov,
+                                   g_showWireframe); // Disable culling in wireframe mode
         }
     }
 }

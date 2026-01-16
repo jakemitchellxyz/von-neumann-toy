@@ -12,6 +12,8 @@
 // Static member initialization
 TextureResolution Settings::s_textureResolution = TextureResolution::Medium;
 TextureResolution Settings::s_runningResolution = TextureResolution::Medium;
+bool Settings::s_fxaaEnabled = true; // Enabled by default
+bool Settings::s_vsyncEnabled = false; // Disabled by default (uncapped FPS)
 bool Settings::s_hasUnsavedChanges = false;
 bool Settings::s_loaded = false;
 
@@ -113,6 +115,32 @@ bool Settings::load(const std::string& filepath) {
         s_textureResolution = TextureResolution::Medium;
     }
     
+    // Parse fxaaEnabled setting
+    // Look for: "fxaaEnabled": true or "fxaaEnabled": false
+    std::regex fxaaRegex("\"fxaaEnabled\"\\s*:\\s*(true|false)");
+    std::smatch fxaaMatch;
+    
+    if (std::regex_search(content, fxaaMatch, fxaaRegex)) {
+        std::string fxaaValue = fxaaMatch[1].str();
+        s_fxaaEnabled = (fxaaValue == "true");
+        std::cout << "Loaded FXAA setting: " << (s_fxaaEnabled ? "enabled" : "disabled") << std::endl;
+    } else {
+        s_fxaaEnabled = true; // Default enabled
+    }
+    
+    // Parse vsyncEnabled setting
+    // Look for: "vsyncEnabled": true or "vsyncEnabled": false
+    std::regex vsyncRegex("\"vsyncEnabled\"\\s*:\\s*(true|false)");
+    std::smatch vsyncMatch;
+    
+    if (std::regex_search(content, vsyncMatch, vsyncRegex)) {
+        std::string vsyncValue = vsyncMatch[1].str();
+        s_vsyncEnabled = (vsyncValue == "true");
+        std::cout << "Loaded VSync setting: " << (s_vsyncEnabled ? "enabled" : "disabled") << std::endl;
+    } else {
+        s_vsyncEnabled = false; // Default disabled (uncapped FPS)
+    }
+    
     s_runningResolution = s_textureResolution;
     s_hasUnsavedChanges = false;
     
@@ -132,7 +160,11 @@ bool Settings::save(const std::string& filepath) {
     file << "{\n";
     file << "    // Texture resolution for Earth surface\n";
     file << "    // Options: \"Low\" (1024x512), \"Medium\" (4096x2048), \"High\" (8192x4096), \"Ultra\" (16384x8192)\n";
-    file << "    \"textureResolution\": \"" << getResolutionName(s_textureResolution) << "\"\n";
+    file << "    \"textureResolution\": \"" << getResolutionName(s_textureResolution) << "\",\n";
+    file << "    // FXAA antialiasing (Fast Approximate Anti-Aliasing)\n";
+    file << "    \"fxaaEnabled\": " << (s_fxaaEnabled ? "true" : "false") << ",\n";
+    file << "    // VSync (Vertical Synchronization) - caps framerate to display refresh rate\n";
+    file << "    \"vsyncEnabled\": " << (s_vsyncEnabled ? "true" : "false") << "\n";
     file << "}\n";
     
     file.close();
@@ -153,6 +185,30 @@ TextureResolution Settings::getTextureResolution() {
 void Settings::setTextureResolution(TextureResolution res) {
     if (s_textureResolution != res) {
         s_textureResolution = res;
+        s_hasUnsavedChanges = true;
+        save();  // Auto-save on change
+    }
+}
+
+bool Settings::getFXAAEnabled() {
+    return s_fxaaEnabled;
+}
+
+void Settings::setFXAAEnabled(bool enabled) {
+    if (s_fxaaEnabled != enabled) {
+        s_fxaaEnabled = enabled;
+        s_hasUnsavedChanges = true;
+        save();  // Auto-save on change
+    }
+}
+
+bool Settings::getVSyncEnabled() {
+    return s_vsyncEnabled;
+}
+
+void Settings::setVSyncEnabled(bool enabled) {
+    if (s_vsyncEnabled != enabled) {
+        s_vsyncEnabled = enabled;
         s_hasUnsavedChanges = true;
         save();  // Auto-save on change
     }

@@ -11,11 +11,20 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#define NOMINMAX // Prevent Windows.h from defining min/max macros
+#include <windows.h>
+#else
+#include <limits.h>
+#include <unistd.h>
+#endif
+
 
 // Import our concerns modules
+#include "concerns/atmosphere-renderer.h"
 #include "concerns/camera-controller.h"
 #include "concerns/constants.h"
-#include "concerns/constellation-loader.h" // For getDefaultsPath()
+#include "concerns/fxaa.h"
 #include "concerns/gravity-grid.h"
 #include "concerns/settings.h"
 #include "concerns/solar-lighting.h"
@@ -58,12 +67,60 @@ const double TRAIL_RECORD_INTERVAL = 0.1; // Record trail point every 0.1 days (
 // Global camera controller instance
 CameraController camera;
 
+// Get the path to the defaults directory
+// Checks next to the executable first, then falls back to current directory
+std::string getDefaultsPath()
+{
+    // Try to get executable directory
+    std::filesystem::path exePath;
+
+#ifdef _WIN32
+    // On Windows, use GetModuleFileName
+    char exePathBuf[1024];
+    DWORD result = GetModuleFileNameA(nullptr, exePathBuf, sizeof(exePathBuf));
+    if (result != 0 && result < sizeof(exePathBuf))
+    {
+        exePath = std::filesystem::path(exePathBuf).parent_path();
+    }
+#else
+    // On Linux/Mac, try reading /proc/self/exe or use argv[0]
+    char exePathBuf[1024];
+    ssize_t len = readlink("/proc/self/exe", exePathBuf, sizeof(exePathBuf) - 1);
+    if (len != -1 && len < static_cast<ssize_t>(sizeof(exePathBuf)))
+    {
+        exePathBuf[len] = '\0';
+        exePath = std::filesystem::path(exePathBuf).parent_path();
+    }
+#endif
+
+    // Check if defaults exists next to executable
+    if (!exePath.empty())
+    {
+        std::filesystem::path defaultsPath = exePath / "defaults";
+        if (std::filesystem::exists(defaultsPath) && std::filesystem::is_directory(defaultsPath))
+        {
+            return defaultsPath.string();
+        }
+    }
+
+    // Fall back to "defaults" in current directory
+    std::filesystem::path defaultsPath = std::filesystem::current_path() / "defaults";
+    if (std::filesystem::exists(defaultsPath) && std::filesystem::is_directory(defaultsPath))
+    {
+        return defaultsPath.string();
+    }
+
+    // Last resort: return "defaults" relative to current directory
+    return "defaults";
+}
+
 // Window resize callback
 void FramebufferSizeCallback(GLFWwindow *window, int width, int height)
 {
     screenWidth = width;
     screenHeight = height;
     glViewport(0, 0, width, height);
+    ResizeFXAA(width, height);
 
     // Update camera controller's screen dimensions for raycasting
     camera.updateScreenSize(width, height);
@@ -161,6 +218,7 @@ void initializeFromSpice()
 // Forward declarations
 GLFWwindow *StartGLFW();
 void DrawSphere(const glm::vec3 &center, float radius, const glm::vec3 &color, int slices, int stacks);
+void DrawWireframeSphere(const glm::vec3 &center, float radius, int slices, int stacks);
 void DrawOrbit(const glm::vec3 &center,
                const glm::vec3 &bodyPosition,
                float lineWidth,
@@ -474,11 +532,6 @@ int main()
     (void)earthIceMasksReady; // Currently unused, prepared for future feature
     std::cout << "\n";
 
-    // Generate atmosphere transmittance LUT (precomputed to avoid ray marching every frame)
-    // Creates 2D lookup table: altitude vs sun zenith angle -> RGB transmittance
-    bool atmosphereLUTReady = EarthMaterial::preprocessAtmosphereTransmittanceLUT("earth-textures");
-    (void)atmosphereLUTReady; // Prepared for future use
-    std::cout << "\n";
 
     // Preprocess city data from Excel file into texture
     // Loads worldcities.xlsx and generates city location texture (sinusoidal projection)
@@ -492,14 +545,130 @@ int main()
         earthColorTexturesReady + (earthElevationReady ? 1 : 0) + earthSpecularReady + (earthNightlightsReady ? 1 : 0);
 
     // ========================================================================
-    // Generate star texture at configured resolution (if not already cached).
-    // Uses J2000.0 epoch for star positions - proper motion is negligible at human timescales.
-    const double J2000_JD = 2451545.0;                       // January 1, 2000, 12:00 TT
-    int starsRendered = GenerateStarTexture("defaults",      // Source star catalog
-                                            "star-textures", // Output texture folder
-                                            textureRes,      // Use configured resolution
-                                            J2000_JD         // Reference epoch for star positions
-    );
+    // Preprocess skybox textures
+    // Resizes TIF and EXR files from defaults/celestial-skybox/ to 2x the user's selected resolution
+    // MANDATORY: This MUST succeed or the application cannot continue
+    std::cout << "\n";
+
+    // For preprocessing, we need the SOURCE defaults directory (where the original files are),
+    // not the runtime defaults directory (which is copied to build/Release/defaults)
+    // The source directory is typically ../../defaults relative to the executable
+    std::string runtimeDefaultsPath = getDefaultsPath();
+    std::filesystem::path sourceDefaultsPath;
+
+    // Try to find source defaults directory
+    // Method 1: Check if ../../defaults exists relative to executable
+    std::filesystem::path exePath;
+#ifdef _WIN32
+    char exePathBuf[1024];
+    DWORD result = GetModuleFileNameA(nullptr, exePathBuf, sizeof(exePathBuf));
+    if (result != 0 && result < sizeof(exePathBuf))
+    {
+        exePath = std::filesystem::path(exePathBuf).parent_path();
+    }
+#else
+    char exePathBuf[1024];
+    ssize_t len = readlink("/proc/self/exe", exePathBuf, sizeof(exePathBuf) - 1);
+    if (len != -1 && len < static_cast<ssize_t>(sizeof(exePathBuf)))
+    {
+        exePathBuf[len] = '\0';
+        exePath = std::filesystem::path(exePathBuf).parent_path();
+    }
+#endif
+
+    if (!exePath.empty())
+    {
+        // Try ../../defaults (typical build structure: build/Release/vnt.exe -> ../../defaults)
+        std::filesystem::path candidate = exePath.parent_path().parent_path() / "defaults";
+        if (std::filesystem::exists(candidate) && std::filesystem::is_directory(candidate))
+        {
+            sourceDefaultsPath = candidate;
+        }
+        else
+        {
+            // Try ../defaults (if executable is directly in build/)
+            candidate = exePath.parent_path() / "defaults";
+            if (std::filesystem::exists(candidate) && std::filesystem::is_directory(candidate))
+            {
+                sourceDefaultsPath = candidate;
+            }
+            else
+            {
+                // Fall back to runtime defaults (might be the same if running from source)
+                sourceDefaultsPath = runtimeDefaultsPath;
+            }
+        }
+    }
+    else
+    {
+        // Fall back to runtime defaults
+        sourceDefaultsPath = runtimeDefaultsPath;
+    }
+
+    std::string defaultsPath = sourceDefaultsPath.string();
+    std::string outputPath = "celestial-skybox";
+    std::string outputDir = outputPath + "/" + getResolutionFolderName(textureRes);
+    std::string criticalFile = outputDir + "/milkyway_combined.hdr";
+
+    std::cout << "Using source defaults path: " << defaultsPath << std::endl;
+    std::cout << "  Absolute: " << std::filesystem::absolute(defaultsPath).string() << std::endl;
+
+    // Check if critical file exists
+    bool needsPreprocessing = !std::filesystem::exists(criticalFile);
+
+    if (needsPreprocessing)
+    {
+        std::cout << "Skybox textures not found. Running preprocessing..." << std::endl;
+        std::cout.flush();
+    }
+    else
+    {
+        std::cout << "Skybox textures found. Skipping preprocessing." << std::endl;
+        std::cout.flush();
+    }
+
+    // Always run preprocessing if critical file doesn't exist
+    bool skyboxTexturesReady = PreprocessSkyboxTextures(defaultsPath, // Source in defaults/celestial-skybox/
+                                                        outputPath,   // Output folder
+                                                        textureRes);
+
+    // Verify critical file was created
+    if (!std::filesystem::exists(criticalFile))
+    {
+        std::cerr << "\n=== FATAL ERROR: Skybox preprocessing failed! ===" << std::endl;
+        std::cerr << "The critical skybox texture file was not created: " << criticalFile << std::endl;
+        std::cerr << "Source files should be in: " << defaultsPath << "/celestial-skybox/" << std::endl;
+        std::cerr << "  Required files:" << std::endl;
+        std::cerr << "    - constellation_figures_32k.tif" << std::endl;
+        std::cerr << "    - celestial_grid_32k.tif" << std::endl;
+        std::cerr << "    - constellation_bounds_32k.tif" << std::endl;
+        std::cerr << "    - milkyway_2020_16k.exr" << std::endl;
+        std::cerr << "    - hiptyc_2020_16k.exr" << std::endl;
+        std::cerr << "Output directory: " << std::filesystem::absolute(outputDir).string() << std::endl;
+        std::cerr << "================================================" << std::endl;
+        std::cerr << "Cannot continue without skybox textures. Exiting." << std::endl;
+        return -1; // Exit application - cannot continue without skybox
+    }
+
+    std::cout << "Skybox preprocessing completed successfully." << std::endl;
+    std::cout << "\n";
+
+    // ========================================================================
+    // Preprocess wind data from NetCDF files
+    // Processes 12 monthly NetCDF files and creates a static 3D LUT binary file
+    std::cout << "\n";
+    bool windDataReady = EarthMaterial::preprocessWindData("defaults",       // Source in defaults/wind-forces/
+                                                           "earth-textures", // Output next to other earth textures
+                                                           textureRes);
+    (void)windDataReady; // Prepared for runtime use
+    std::cout << "\n";
+
+    // ========================================================================
+    // Preprocess atmosphere LUTs
+    // Generates transmittance and scattering lookup tables for atmosphere rendering
+    std::cout << "\n";
+    bool atmosphereLUTsReady = EarthMaterial::preprocessAtmosphereLUTs("earth-textures");
+    (void)atmosphereLUTsReady; // Prepared for runtime use
     std::cout << "\n";
 
     GLFWwindow *window = StartGLFW();
@@ -507,6 +676,9 @@ int main()
         return -1;
 
     glfwMakeContextCurrent(window);
+
+    // Set initial VSync state from settings
+    glfwSwapInterval(Settings::getVSyncEnabled() ? 1 : 0);
 
     // Set up window resize callback
     glfwSetFramebufferSizeCallback(window, FramebufferSizeCallback);
@@ -554,17 +726,84 @@ int main()
     InitializeSkybox("defaults");
 
     // Initialize star texture material (load pre-generated texture into OpenGL)
-    if (InitializeStarTextureMaterial("star-textures", textureRes))
+    if (InitializeStarTextureMaterial("celestial-skybox", textureRes))
     {
-        std::cout << "Star texture material initialized successfully\n";
+        std::cout << "Celestial skybox texture material initialized successfully\n";
     }
     else
     {
-        std::cout << "Star texture not available, will use dynamic rendering\n";
+        std::cerr << "ERROR: Failed to initialize celestial skybox textures!\n";
+        std::cerr << "  Expected textures in: celestial-skybox/" << getResolutionFolderName(textureRes) << "/\n";
+        std::cerr << "  Looking for: milkyway_combined.hdr (or milkyway_2020.hdr/exr + hiptyc_2020.hdr/exr), "
+                     "celestial_grid.png (or .jpg), "
+                     "constellation_figures.png (or .jpg), constellation_bounds.png (or .jpg)\n";
+        std::cerr << "  Skybox will not be rendered.\n";
     }
 
     // Initialize UI system
     InitUI();
+
+    // Initialize FXAA system
+    if (InitFXAA())
+    {
+        std::cout << "FXAA antialiasing initialized successfully\n";
+        ResizeFXAA(screenWidth, screenHeight);
+    }
+    else
+    {
+        std::cerr << "Warning: FXAA initialization failed, antialiasing disabled\n";
+    }
+
+    // Initialize atmosphere renderer
+    if (InitAtmosphereRenderer())
+    {
+        std::cout << "Atmosphere renderer initialized successfully\n";
+        // Load atmosphere LUTs - try multiple possible paths
+        std::vector<std::string> lutBasePaths = {"earth-textures/luts",
+                                                 "defaults/earth-textures/luts",
+                                                 "../earth-textures/luts"};
+
+        std::string transmittancePath;
+        std::string scatteringPath;
+        bool foundLUTs = false;
+
+        // Find directory containing both LUT files
+        for (const auto &basePath : lutBasePaths)
+        {
+            std::string testTransmittance = basePath + "/earth_atmosphere_transmittance_lut.hdr";
+            std::string testScattering = basePath + "/earth_atmosphere_scattering_lut.hdr";
+
+            if (std::filesystem::exists(testTransmittance) && std::filesystem::exists(testScattering))
+            {
+                transmittancePath = testTransmittance;
+                scatteringPath = testScattering;
+                foundLUTs = true;
+                break;
+            }
+        }
+
+        // Fallback to first path if none found (will show error)
+        if (!foundLUTs)
+        {
+            transmittancePath = lutBasePaths[0] + "/earth_atmosphere_transmittance_lut.hdr";
+            scatteringPath = lutBasePaths[0] + "/earth_atmosphere_scattering_lut.hdr";
+        }
+
+        if (LoadAtmosphereLUTs(transmittancePath, scatteringPath))
+        {
+            std::cout << "Atmosphere LUTs loaded successfully\n";
+        }
+        else
+        {
+            std::cout << "Atmosphere LUTs not found (atmosphere effects disabled)\n";
+            std::cout << "  Tried transmittance: " << transmittancePath << "\n";
+            std::cout << "  Tried scattering: " << scatteringPath << "\n";
+        }
+    }
+    else
+    {
+        std::cerr << "Warning: Atmosphere renderer initialization failed\n";
+    }
 
     // Initialize Earth material (load pre-combined monthly textures into OpenGL)
     if (g_earthMaterial.initialize("earth-textures", textureRes))
@@ -925,12 +1164,17 @@ int main()
 
         camera.processKeyboard(window);
 
+        // Begin FXAA rendering (renders to framebuffer if enabled)
+        bool fxaaActive = BeginFXAA();
+
+        // If FXAA is active, we're rendering to framebuffer, otherwise directly to screen
         glClearColor(0.003f, 0.003f, 0.012f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         // Skip rendering if window is minimized (zero size)
         if (screenWidth <= 0 || screenHeight <= 0)
         {
+            EndFXAA(); // End FXAA even if skipping rendering
             glfwSwapBuffers(window);
             glfwPollEvents();
             continue;
@@ -1191,6 +1435,18 @@ int main()
         glLoadMatrixf(glm::value_ptr(view));
 
         // ====================================================================
+        // Set camera info for geometry culling in EarthMaterial and SolarLighting
+        // ====================================================================
+        EarthMaterial::setCameraInfo(camera.position, camera.getFront(), glm::radians(camera.fov));
+        EarthMaterial::setScreenDimensions(screenWidth, screenHeight);
+        SolarLighting::setCameraInfo(camera.position, camera.getFront(), glm::radians(camera.fov));
+
+        // ====================================================================
+        // Start triangle counting query (counts triangles rendered after culling)
+        // ====================================================================
+        StartTriangleCountQuery();
+
+        // ====================================================================
         // Raycast for mouse picking (handled by camera controller)
         // Skip raycast if mouse is over UI elements
         // ====================================================================
@@ -1200,9 +1456,11 @@ int main()
         camera.updateRaycast(allBodies, window, mouseOverUI);
 
         // ====================================================================
-        // Update measurement result if measurement mode is active
+        // Update measurement result if measurement mode is active (non-color-picker modes)
         // ====================================================================
-        if (GetMeasurementMode() != MeasurementMode::None && !mouseOverUI)
+        // Note: Color picker reads pixel after rendering, see below
+        if (GetMeasurementMode() != MeasurementMode::None && GetMeasurementMode() != MeasurementMode::ColorPicker &&
+            !mouseOverUI)
         {
             glm::vec3 rayDir = camera.getMouseRayDirection();
             UpdateMeasurementResult(camera.position, rayDir, allBodies, camera.maxRayDistance);
@@ -1219,7 +1477,7 @@ int main()
         else
         {
             // Fall back to dynamic per-frame star rendering
-            DrawSkybox(camera.position, currentJD, camera.getFront(), camera.getUp());
+            DrawSkyboxTextured(camera.position);
         }
 
         // ====================================================================
@@ -1636,6 +1894,143 @@ int main()
         }
 
         // ====================================================================
+        // Wireframe overlay pass (if enabled) - render lines on top of filled polygons
+        // ====================================================================
+        if (g_showWireframe)
+        {
+            // Save all OpenGL state before wireframe rendering
+            glPushAttrib(GL_ALL_ATTRIB_BITS);
+
+            // Enable depth testing for proper occlusion - triangles behind other triangles should be occluded
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LEQUAL); // Use LEQUAL so wireframes render correctly with depth
+            glDepthMask(GL_FALSE);  // Don't write to depth buffer (read-only for occlusion)
+
+            // Disable lighting and textures for wireframe (edges should be unlit)
+            // CRITICAL: Disable all lighting-related state
+            glDisable(GL_LIGHTING);
+            glDisable(GL_LIGHT0);
+            glDisable(GL_COLOR_MATERIAL); // Disable color material to prevent lighting-like effects
+            glDisable(GL_TEXTURE_2D);
+
+            // Set polygon mode to lines for wireframe overlay
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            glDisable(GL_CULL_FACE); // Show all edges
+
+            // CRITICAL: Reset all material properties to ensure unlit rendering
+            // Set material to fully emissive (no lighting calculation)
+            GLfloat matEmissive[] = {0.8f, 0.9f, 1.0f, 1.0f};
+            GLfloat matAmbient[] = {0.8f, 0.9f, 1.0f, 1.0f};
+            GLfloat matDiffuse[] = {0.8f, 0.9f, 1.0f, 1.0f};
+            GLfloat matSpecular[] = {0.0f, 0.0f, 0.0f, 1.0f};
+            glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, matEmissive);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matAmbient);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, matDiffuse);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, matSpecular);
+            glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
+
+            // Set wireframe color (bright white/cyan for visibility)
+            // This should be used directly since lighting is disabled
+            glColor3f(0.8f, 0.9f, 1.0f);
+            glLineWidth(1.0f);
+
+            // Unbind any shaders - polygon mode only works with fixed-function pipeline
+            glUseProgram(0);
+
+            // Re-render all objects in wireframe mode using the same render queue
+            // CRITICAL: Ensure lighting stays disabled throughout - some draw functions re-enable it
+            glDisable(GL_LIGHTING);
+            glDisable(GL_LIGHT0);
+
+            for (const RenderItem &item : renderQueue)
+            {
+                // Force lighting off before each draw (setupLightingForBody and drawEmissiveSphere re-enable it)
+                glDisable(GL_LIGHTING);
+                glDisable(GL_LIGHT0);
+
+                // Check if this body uses textured material (Earth) - needs special handling
+                if (item.body->useTexturedMaterial && g_earthMaterial.isInitialized())
+                {
+                    // Earth uses shaders, but we've unbound them, so polygon mode will work
+                    // Re-render the same geometry but in wireframe mode
+                    // Use the same tessellation and culling as the filled version
+                    EarthMaterial::setCameraInfo(camera.position, camera.getFront(), glm::radians(camera.fov));
+                    g_earthMaterial.drawWireframe(item.body->position,
+                                                  item.body->displayRadius,
+                                                  item.body->poleDirection,
+                                                  item.body->primeMeridianDirection,
+                                                  currentJD,
+                                                  camera.position);
+                }
+                else
+                {
+                    // Regular bodies - polygon mode will work with shaders unbound
+                    // But they call setupLightingForBody() which re-enables GL_LIGHTING
+                    // We need to disable it immediately after
+                    item.body->draw(currentJD, camera.position);
+                }
+
+                // CRITICAL: Force lighting off after each draw
+                // setupLightingForBody() enables GL_LIGHTING and GL_LIGHT0
+                // drawEmissiveSphere() re-enables GL_LIGHTING at the end
+                glDisable(GL_LIGHTING);
+                glDisable(GL_LIGHT0);
+            }
+
+            // Final safety check - ensure lighting is off before restoring state
+            glDisable(GL_LIGHTING);
+            glDisable(GL_LIGHT0);
+
+            // Also draw skybox wireframe if it was rendered
+            if (IsStarTextureReady())
+            {
+                // Skybox uses shaders, but we've unbound them
+                // Re-render skybox geometry in wireframe mode
+                DrawSkyboxWireframe(camera.position);
+            }
+
+            // Restore all state
+            glPopAttrib();
+        }
+
+        // ====================================================================
+        // End triangle counting query (after all 3D rendering, before UI)
+        // ====================================================================
+        EndTriangleCountQuery();
+
+        // ====================================================================
+        // Read color picker pixel (after all 3D rendering, before UI)
+        // ====================================================================
+        if (GetMeasurementMode() == MeasurementMode::ColorPicker && !mouseOverUI)
+        {
+            // Color picker: read pixel color from framebuffer at mouse position
+            // Note: glReadPixels reads from bottom-left, but mouseY is from top-left
+            double mouseX, mouseY;
+            glfwGetCursorPos(window, &mouseX, &mouseY);
+            int mouseXInt = static_cast<int>(mouseX);
+            int mouseYInt = static_cast<int>(mouseY);
+            int framebufferY = screenHeight - mouseYInt - 1; // Flip Y coordinate
+
+            // Clamp to valid framebuffer bounds
+            mouseXInt = std::max(0, std::min(mouseXInt, screenWidth - 1));
+            framebufferY = std::max(0, std::min(framebufferY, screenHeight - 1));
+
+            // Read pixel color (RGBA)
+            unsigned char pixel[4];
+            glReadPixels(mouseXInt, framebufferY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+
+            // Update measurement result with color
+            MeasurementResult &result = const_cast<MeasurementResult &>(GetMeasurementResult());
+            result.hasColor = true;
+            result.colorRInt = pixel[0];
+            result.colorGInt = pixel[1];
+            result.colorBInt = pixel[2];
+            result.colorR = pixel[0] / 255.0f;
+            result.colorG = pixel[1] / 255.0f;
+            result.colorB = pixel[2] / 255.0f;
+        }
+
+        // ====================================================================
         // Draw 2D UI overlay
         // ====================================================================
         int fps = UpdateFPS();
@@ -1660,11 +2055,10 @@ int main()
         timeParams.showGravityGrid = g_showGravityGrid;
         timeParams.showConstellations = g_showConstellations;
         timeParams.showForceVectors = g_showForceVectors;
-        timeParams.showAtmosphereLayers = g_showAtmosphereLayers;
         timeParams.showSunSpot = g_showSunSpot;
-        timeParams.enableAtmosphere = g_enableAtmosphere;
-        timeParams.useAtmosphereLUT = g_useAtmosphereLUT;
-        timeParams.useMultiscatterLUT = g_useMultiscatterLUT;
+        timeParams.showWireframe = g_showWireframe;
+        timeParams.fxaaEnabled = IsFXAAEnabled();
+        timeParams.vsyncEnabled = Settings::getVSyncEnabled();
         timeParams.gravityGridResolution = g_gravityGridResolution;
         timeParams.gravityWarpStrength = g_gravityWarpStrength;
         timeParams.currentFOV = camera.fov;
@@ -1692,52 +2086,81 @@ int main()
         // Prepare tooltip for 3D hovered body or measurement
         TooltipParams tooltip;
 
-        // Show measurement tooltip if measurement mode is active and we have a hit
-        if (GetMeasurementMode() != MeasurementMode::None && measureResult.hasHit && measureResult.hitBody)
+        // Show measurement tooltip if measurement mode is active
+        if (GetMeasurementMode() != MeasurementMode::None)
         {
-            tooltip.show = true;
-            tooltip.mouseX = mouseX;
-            tooltip.mouseY = mouseY;
+            if (GetMeasurementMode() == MeasurementMode::ColorPicker)
+            {
+                // Color picker tooltip: show color information
+                if (measureResult.hasColor)
+                {
+                    tooltip.show = true;
+                    tooltip.mouseX = mouseX;
+                    tooltip.mouseY = mouseY;
 
-            std::string tooltipText = "";
-            if (GetMeasurementMode() == MeasurementMode::LongitudeLatitude)
-            {
-                // Format lat/lon in degrees
-                double latDeg = glm::degrees(measureResult.latitude);
-                double lonDeg = glm::degrees(measureResult.longitude);
-                char latDir = latDeg >= 0 ? 'N' : 'S';
-                char lonDir = lonDeg >= 0 ? 'E' : 'W';
-                char buf[128];
-                snprintf(buf,
-                         sizeof(buf),
-                         "%s\n%.4f° %c, %.4f° %c",
-                         measureResult.hitBody->name.c_str(),
-                         std::abs(latDeg),
-                         latDir,
-                         std::abs(lonDeg),
-                         lonDir);
-                tooltipText = buf;
+                    // Format color as RGB and hex
+                    char buf[256];
+                    snprintf(buf,
+                             sizeof(buf),
+                             "Color Picker\nRGB: %d, %d, %d\nHex: #%02X%02X%02X\nFloat: %.3f, %.3f, %.3f",
+                             measureResult.colorRInt,
+                             measureResult.colorGInt,
+                             measureResult.colorBInt,
+                             measureResult.colorRInt,
+                             measureResult.colorGInt,
+                             measureResult.colorBInt,
+                             measureResult.colorR,
+                             measureResult.colorG,
+                             measureResult.colorB);
+                    tooltip.text = buf;
+                }
             }
-            else if (GetMeasurementMode() == MeasurementMode::AltitudeDepth)
+            else if (measureResult.hasHit && measureResult.hitBody)
             {
-                // For now, show lat/lon (elevation will be added later)
-                double latDeg = glm::degrees(measureResult.latitude);
-                double lonDeg = glm::degrees(measureResult.longitude);
-                char latDir = latDeg >= 0 ? 'N' : 'S';
-                char lonDir = lonDeg >= 0 ? 'E' : 'W';
-                char buf[128];
-                snprintf(buf,
-                         sizeof(buf),
-                         "%s\n%.4f° %c, %.4f° %c\nElevation: %.1f m",
-                         measureResult.hitBody->name.c_str(),
-                         std::abs(latDeg),
-                         latDir,
-                         std::abs(lonDeg),
-                         lonDir,
-                         measureResult.elevation);
-                tooltipText = buf;
+                tooltip.show = true;
+                tooltip.mouseX = mouseX;
+                tooltip.mouseY = mouseY;
+
+                std::string tooltipText = "";
+                if (GetMeasurementMode() == MeasurementMode::LongitudeLatitude)
+                {
+                    // Format lat/lon in degrees
+                    double latDeg = glm::degrees(measureResult.latitude);
+                    double lonDeg = glm::degrees(measureResult.longitude);
+                    char latDir = latDeg >= 0 ? 'N' : 'S';
+                    char lonDir = lonDeg >= 0 ? 'E' : 'W';
+                    char buf[128];
+                    snprintf(buf,
+                             sizeof(buf),
+                             "%s\n%.4f° %c, %.4f° %c",
+                             measureResult.hitBody->name.c_str(),
+                             std::abs(latDeg),
+                             latDir,
+                             std::abs(lonDeg),
+                             lonDir);
+                    tooltipText = buf;
+                }
+                else if (GetMeasurementMode() == MeasurementMode::AltitudeDepth)
+                {
+                    // For now, show lat/lon (elevation will be added later)
+                    double latDeg = glm::degrees(measureResult.latitude);
+                    double lonDeg = glm::degrees(measureResult.longitude);
+                    char latDir = latDeg >= 0 ? 'N' : 'S';
+                    char lonDir = lonDeg >= 0 ? 'E' : 'W';
+                    char buf[128];
+                    snprintf(buf,
+                             sizeof(buf),
+                             "%s\n%.4f° %c, %.4f° %c\nElevation: %.1f m",
+                             measureResult.hitBody->name.c_str(),
+                             std::abs(latDeg),
+                             latDir,
+                             std::abs(lonDeg),
+                             lonDir,
+                             measureResult.elevation);
+                    tooltipText = buf;
+                }
+                tooltip.text = tooltipText;
             }
-            tooltip.text = tooltipText;
         }
         else
         {
@@ -1893,10 +2316,54 @@ int main()
         // Check if in surface view mode on this body
         contextMenu.isInSurfaceView = camera.isInSurfaceView() && camera.selectedBody == camera.contextMenuBody;
 
+        // Update triangle count (reads query result from previous frame)
+        int triangleCount = UpdateTriangleCount();
+
+        // End FXAA rendering (applies post-processing if enabled)
+        // This must be called before atmosphere rendering so atmosphere renders on top
+        EndFXAA();
+
+        // Render atmosphere overlay (fullscreen quad with SDF cone marching)
+        // Render whenever Earth is visible (not just when selected) and atmosphere renderer is ready
+        // Rendered AFTER FXAA so it appears on top of the post-processed scene
+        if (IsAtmosphereRendererReady())
+        {
+            // Check if Earth is visible (in frustum)
+            float fovRadians = glm::radians(camera.fov);
+            if (isInFrustum(earth.position, earth.displayRadius, camera.position, camera.getFront(), fovRadians))
+            {
+                glm::vec3 planetCenter = earth.position;
+                float planetRadius = earth.displayRadius;
+                float atmosphereRadius = planetRadius * (1.0f + 100.0f / 6371.0f); // ~100km atmosphere height
+
+                // Get sun direction and color
+                glm::vec3 sunDir = glm::normalize(sun.position - planetCenter);
+                glm::vec3 sunColor = glm::vec3(1.0f, 1.0f, 1.0f); // White sunlight
+
+                // Get camera vectors
+                glm::vec3 cameraRight = glm::normalize(glm::cross(camera.getFront(), camera.getUp()));
+                glm::vec3 cameraUp = glm::normalize(glm::cross(cameraRight, camera.getFront()));
+
+                RenderAtmosphere(camera.position,
+                                 camera.getFront(),
+                                 cameraRight,
+                                 cameraUp,
+                                 fovRadians,
+                                 static_cast<float>(screenWidth) / static_cast<float>(screenHeight),
+                                 camera.getDynamicNearPlane(),
+                                 planetCenter,
+                                 planetRadius,
+                                 atmosphereRadius,
+                                 sunDir,
+                                 sunColor);
+            }
+        }
+
         // Draw UI and get interaction results
         UIInteraction uiResult = DrawUserInterface(screenWidth,
                                                    screenHeight,
                                                    fps,
+                                                   triangleCount,
                                                    allBodies,
                                                    timeParams,
                                                    mouseX,
@@ -2030,37 +2497,51 @@ int main()
             g_showConstellations = !g_showConstellations;
             std::cout << "Constellations " << (g_showConstellations ? "shown" : "hidden") << "\n";
         }
+        if (uiResult.constellationGridToggled)
+        {
+            g_showCelestialGrid = !g_showCelestialGrid;
+            std::cout << "Celestial grid " << (g_showCelestialGrid ? "shown" : "hidden") << "\n";
+        }
+        if (uiResult.constellationFiguresToggled)
+        {
+            g_showConstellationFigures = !g_showConstellationFigures;
+            std::cout << "Constellation figures " << (g_showConstellationFigures ? "shown" : "hidden") << "\n";
+        }
+        if (uiResult.constellationBoundsToggled)
+        {
+            g_showConstellationBounds = !g_showConstellationBounds;
+            std::cout << "Constellation bounds " << (g_showConstellationBounds ? "shown" : "hidden") << "\n";
+        }
         if (uiResult.forceVectorsToggled)
         {
             g_showForceVectors = !g_showForceVectors;
             std::cout << "Force vectors " << (g_showForceVectors ? "shown" : "hidden") << "\n";
-        }
-        if (uiResult.atmosphereLayersToggled)
-        {
-            g_showAtmosphereLayers = !g_showAtmosphereLayers;
-            g_earthMaterial.setShowAtmosphereLayers(g_showAtmosphereLayers);
-            std::cout << "Atmosphere layers " << (g_showAtmosphereLayers ? "shown" : "hidden") << "\n";
         }
         if (uiResult.sunSpotToggled)
         {
             g_showSunSpot = !g_showSunSpot;
             std::cout << "Sun spot " << (g_showSunSpot ? "shown" : "hidden") << "\n";
         }
-        if (uiResult.enableAtmosphereToggled)
+        if (uiResult.wireframeToggled)
         {
-            g_enableAtmosphere = !g_enableAtmosphere;
-            g_earthMaterial.setEnableAtmosphere(g_enableAtmosphere);
-            std::cout << "Atmosphere rendering " << (g_enableAtmosphere ? "enabled" : "disabled") << "\n";
+            g_showWireframe = !g_showWireframe;
+            std::cout << "Wireframe mode " << (g_showWireframe ? "enabled" : "disabled") << "\n";
         }
-        if (uiResult.useAtmosphereLUTToggled)
+        if (uiResult.fxaaToggled)
         {
-            g_useAtmosphereLUT = !g_useAtmosphereLUT;
-            std::cout << "Atmosphere transmittance LUT " << (g_useAtmosphereLUT ? "enabled" : "disabled") << "\n";
+            SetFXAAEnabled(!IsFXAAEnabled());
+            std::cout << "FXAA antialiasing " << (IsFXAAEnabled() ? "enabled" : "disabled") << "\n";
         }
-        if (uiResult.useMultiscatterLUTToggled)
+        if (uiResult.vsyncToggled)
         {
-            g_useMultiscatterLUT = !g_useMultiscatterLUT;
-            std::cout << "Atmosphere multiscatter LUT " << (g_useMultiscatterLUT ? "enabled" : "disabled") << "\n";
+            Settings::setVSyncEnabled(!Settings::getVSyncEnabled());
+            glfwSwapInterval(Settings::getVSyncEnabled() ? 1 : 0);
+            std::cout << "VSync " << (Settings::getVSyncEnabled() ? "enabled" : "disabled") << "\n";
+        }
+        if (uiResult.citiesToggled)
+        {
+            g_economyRenderer.setShowCityLabels(!g_economyRenderer.getShowCityLabels());
+            std::cout << "Cities " << (g_economyRenderer.getShowCityLabels() ? "shown" : "hidden") << "\n";
         }
         if (uiResult.heightmapToggled)
         {
@@ -2078,8 +2559,6 @@ int main()
             std::cout << "Roughness/Specular effect " << (g_earthMaterial.getUseSpecular() ? "enabled" : "disabled")
                       << "\n";
         }
-        // Sync atmosphere enable flag
-        g_earthMaterial.setEnableAtmosphere(g_enableAtmosphere);
         if (uiResult.newGravityGridResolution >= 0)
         {
             g_gravityGridResolution = uiResult.newGravityGridResolution;
@@ -2131,6 +2610,7 @@ int main()
     }
 
     // Cleanup
+    CleanupAtmosphereRenderer();
     SpiceEphemeris::cleanup();
     glfwDestroyWindow(window);
     glfwTerminate();
@@ -2195,6 +2675,55 @@ void DrawSphere(const glm::vec3 &center, float radius, const glm::vec3 &color, i
             glm::vec3 n2 = glm::normalize(glm::vec3(x2, y2, z2));
             glNormal3f(n2.x, n2.y, n2.z);
             glVertex3f(x2, y2, z2);
+        }
+        glEnd();
+
+        // Count triangles: TRIANGLE_STRIP with (slices+1)*2 vertices = (slices+1)*2 - 2 triangles
+        CountTriangles(GL_TRIANGLE_STRIP, (slices + 1) * 2);
+    }
+
+    glPopMatrix();
+}
+
+// Draw a wireframe sphere (for shader-based objects like Earth and skybox)
+void DrawWireframeSphere(const glm::vec3 &center, float radius, int slices, int stacks)
+{
+    glPushMatrix();
+    glTranslatef(center.x, center.y, center.z);
+
+    // Draw latitude lines (horizontal circles)
+    for (int i = 0; i <= stacks; ++i)
+    {
+        float phi = static_cast<float>(PI) * (-0.5f + static_cast<float>(i) / stacks);
+        float y = radius * sin(phi);
+        float r = radius * cos(phi);
+
+        glBegin(GL_LINE_LOOP);
+        for (int j = 0; j <= slices; ++j)
+        {
+            float theta = 2.0f * static_cast<float>(PI) * static_cast<float>(j) / slices;
+            float x = r * cos(theta);
+            float z = r * sin(theta);
+            glVertex3f(x, y, z);
+        }
+        glEnd();
+    }
+
+    // Draw longitude lines (vertical circles)
+    for (int j = 0; j <= slices; ++j)
+    {
+        float theta = 2.0f * static_cast<float>(PI) * static_cast<float>(j) / slices;
+        float cosTheta = cos(theta);
+        float sinTheta = sin(theta);
+
+        glBegin(GL_LINE_STRIP);
+        for (int i = 0; i <= stacks; ++i)
+        {
+            float phi = static_cast<float>(PI) * (-0.5f + static_cast<float>(i) / stacks);
+            float x = radius * cos(phi) * cosTheta;
+            float y = radius * sin(phi);
+            float z = radius * cos(phi) * sinTheta;
+            glVertex3f(x, y, z);
         }
         glEnd();
     }

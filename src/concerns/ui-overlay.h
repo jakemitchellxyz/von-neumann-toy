@@ -1,6 +1,7 @@
 #pragma once
 
 #include "settings.h"
+#include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
@@ -44,12 +45,15 @@ struct UIInteraction
     bool magneticFieldsToggled;      // True if magnetic fields visibility was toggled
     bool gravityGridToggled;         // True if gravity grid visibility was toggled
     bool constellationsToggled;      // True if constellations visibility was toggled
+    bool constellationGridToggled;   // True if celestial grid visibility was toggled
+    bool constellationFiguresToggled; // True if constellation figures visibility was toggled
+    bool constellationBoundsToggled;  // True if constellation bounds visibility was toggled
     bool forceVectorsToggled;        // True if force vectors visibility was toggled
-    bool atmosphereLayersToggled;    // True if atmosphere layers visibility was toggled
     bool sunSpotToggled;             // True if sun spot visibility was toggled
-    bool enableAtmosphereToggled;    // True if atmosphere rendering was toggled
-    bool useAtmosphereLUTToggled;    // True if atmosphere transmittance LUT usage was toggled
-    bool useMultiscatterLUTToggled;  // True if atmosphere multiscatter LUT usage was toggled
+    bool wireframeToggled;           // True if wireframe mode was toggled
+    bool fxaaToggled;                 // True if FXAA antialiasing was toggled
+    bool vsyncToggled;                // True if VSync was toggled
+    bool citiesToggled;              // True if cities visibility was toggled
     bool heightmapToggled;           // True if heightmap effect was toggled
     bool normalMapToggled;           // True if normal map was toggled
     bool roughnessToggled;           // True if roughness/specular effect was toggled
@@ -101,11 +105,10 @@ struct TimeControlParams
     bool showGravityGrid;                // Current gravity grid visibility state
     bool showConstellations;             // Current constellation visibility state
     bool showForceVectors;               // Current force vectors visibility state
-    bool showAtmosphereLayers;           // Current atmosphere layers visibility state
     bool showSunSpot;                    // Current sun spot visibility state
-    bool enableAtmosphere;               // Current atmosphere rendering enabled state
-    bool useAtmosphereLUT;               // Whether to use precomputed transmittance LUT (faster)
-    bool useMultiscatterLUT;             // Whether to use precomputed multiscatter LUT (faster, better quality)
+    bool showWireframe;                  // Current wireframe mode state
+    bool fxaaEnabled;                    // Current FXAA antialiasing state
+    bool vsyncEnabled;                   // Current VSync state
     int gravityGridResolution;           // Current grid resolution (lines per axis)
     float gravityWarpStrength;           // Current warp strength multiplier
     float currentFOV;                    // Current camera field of view in degrees
@@ -137,7 +140,8 @@ enum class MeasurementMode
 {
     None,              // No measurement active
     LongitudeLatitude, // Measuring lat/lon
-    AltitudeDepth      // Measuring altitude/depth
+    AltitudeDepth,     // Measuring altitude/depth
+    ColorPicker        // Color picker tool
 };
 
 // ==================================
@@ -151,6 +155,14 @@ struct MeasurementResult
     double latitude;        // Latitude in radians (if body has coordinate system)
     double longitude;       // Longitude in radians (if body has coordinate system)
     float elevation;        // Elevation in meters (if body has heightmap)
+    // Color picker fields
+    bool hasColor;          // Whether color was successfully read
+    float colorR;           // Red component (0.0-1.0)
+    float colorG;           // Green component (0.0-1.0)
+    float colorB;           // Blue component (0.0-1.0)
+    int colorRInt;          // Red component (0-255)
+    int colorGInt;          // Green component (0-255)
+    int colorBInt;          // Blue component (0-255)
 };
 
 // ==================================
@@ -192,6 +204,7 @@ void InitUI();
 // Main UI drawing function - draws the complete user interface
 // screenWidth/screenHeight: current window dimensions
 // fps: current frames per second
+// triangleCount: current number of triangles rendered (after culling)
 // bodies: array of all celestial bodies to list
 // timeParams: time control parameters (current date, range, dilation)
 // mouseX/mouseY: current mouse position
@@ -203,6 +216,7 @@ void InitUI();
 UIInteraction DrawUserInterface(int screenWidth,
                                 int screenHeight,
                                 int fps,
+                                int triangleCount,
                                 const std::vector<CelestialBody *> &bodies,
                                 const TimeControlParams &timeParams,
                                 double mouseX,
@@ -219,6 +233,26 @@ UIInteraction DrawUserInterface(int screenWidth,
 // Update FPS calculation - call once per frame
 // Returns the current measured FPS
 int UpdateFPS();
+
+// ==================================
+// Triangle Count Helper
+// ==================================
+
+// Start triangle counting query - call before 3D rendering
+void StartTriangleCountQuery();
+
+// End triangle counting query - call after 3D rendering (before UI)
+void EndTriangleCountQuery();
+
+// Update triangle count calculation - call once per frame after EndTriangleCountQuery
+// Returns the current triangle count
+int UpdateTriangleCount();
+
+// Helper function to count triangles from a draw call
+// Call this from draw functions to manually count triangles
+// primitiveType: GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_QUAD_STRIP, etc.
+// vertexCount: number of vertices in the primitive
+void CountTriangles(GLenum primitiveType, int vertexCount);
 
 // Check if mouse is over any UI element (panels, buttons, etc.)
 // Returns true if mouse is over UI, false otherwise
@@ -239,7 +273,8 @@ void SetMeasurementMode(MeasurementMode mode);
 
 // Get current measurement result (for rendering measurement sphere and tooltip)
 // This should be called after DrawUserInterface to get the latest measurement data
-MeasurementResult GetMeasurementResult();
+// Note: Returns const reference - use const_cast if you need to modify (e.g., for color picker)
+const MeasurementResult &GetMeasurementResult();
 
 // Update measurement result based on raycast
 // This should be called from entrypoint.cpp after raycasting

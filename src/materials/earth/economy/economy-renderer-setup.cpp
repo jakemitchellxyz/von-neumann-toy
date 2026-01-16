@@ -18,7 +18,7 @@ EconomyRenderer g_economyRenderer;
 // ============================================================================
 
 EconomyRenderer::EconomyRenderer()
-    : initialized_(false), showCityLabels_(true), minPopulation_(0.0f), shaderProgram_(0), shaderAvailable_(false)
+    : initialized_(false), showCityLabels_(false), minPopulation_(0.0f), shaderProgram_(0), shaderAvailable_(false)
 {
     // Default minimum population: 0 (show all cities)
     // Can be adjusted via setMinPopulation() if needed

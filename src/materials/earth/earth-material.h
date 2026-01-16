@@ -116,42 +116,22 @@ public:
                                        const std::string &outputBasePath,
                                        TextureResolution resolution);
 
-    // Preprocess Atmosphere Transmittance LUT
-    // Generates a 2D lookup table for atmospheric transmittance
-    // - X axis: View altitude (0 to 100km, normalized)
-    // - Y axis: Sun zenith angle (0 to 90 degrees, normalized)
-    // - Value: RGB transmittance (exp(-tau) for Rayleigh wavelengths)
-    // - Output: earth_atmosphere_transmittance_lut.exr (or .hdr)
-    // - Used for: Fast transmittance lookup instead of ray marching
-    static bool preprocessAtmosphereTransmittanceLUT(const std::string &outputBasePath);
+    // Preprocess Wind Data from CCMP NetCDF files
+    // Processes 12 monthly NetCDF files and creates a static 3D LUT binary file
+    // - Input: NetCDF files from defaults/wind-forces/
+    // - Output: earth_wind_3dlut.bin (raw binary: width x height x 12 months x 2 channels)
+    // - Used for: Loading into OpenGL 3D texture during initialization
+    static bool preprocessWindData(const std::string &defaultsPath,
+                                   const std::string &outputBasePath,
+                                   TextureResolution resolution);
 
-    // Preprocess Water Scattering LUTs (Participating Media Architecture)
-    // Generates three LUTs matching atmosphere structure:
-    // - T_water(z, μ): Transmittance LUT (2D)
-    // - S1_water(z, μ, μ_s, ν): Single Scattering LUT (4D packed as 2D)
-    //   ν = cos(angle between view and sun directions) accounts for relative camera rotation
-    // - Sm_water(z, μ): Multiple Scattering LUT (2D)
-    // All saved to outputBasePath folder
-    //
-    // Resolution parameters control LUT fidelity:
-    // - depthRes: Number of depth samples [0, MAX_DEPTH] (higher = better depth resolution)
-    // - muRes: Number of cos(zenith) samples [-1, 1] (higher = better angular resolution)
-    // - muSunRes: Number of sun angle samples for single scatter (higher = better sun angle resolution)
-    // - nuRes: Number of relative angle samples [-1, 1] (higher = better scattering angle resolution)
-    static bool generateWaterScatteringLUT(const std::string &outputBasePath,
-                                           int depthRes = 128, // Higher resolution for depth (bathymetry-dependent)
-                                           int muRes = 64,     // Higher resolution for view angles
-                                           int muSunRes = 32,  // Moderate resolution for sun angles
-                                           int nuRes = 32);    // Moderate resolution for relative angle
+    // Preprocess Atmosphere LUTs
+    // Generates transmittance and scattering lookup tables for atmosphere rendering
+    // - Output: earth_atmosphere_transmittance_lut.hdr and earth_atmosphere_scattering_lut.hdr
+    // - Creates directory structure if needed
+    // - Generates simple placeholder LUTs if they don't exist (can be replaced with proper ones)
+    static bool preprocessAtmosphereLUTs(const std::string &outputBasePath);
 
-    // Individual LUT generation functions with separate resolution control
-    static bool generateWaterTransmittanceLUT(const std::string &outputPath, int depthRes, int muRes);
-    static bool generateWaterSingleScatteringLUT(const std::string &outputPath,
-                                                 int depthRes,
-                                                 int muRes,
-                                                 int muSunRes,
-                                                 int nuRes);
-    static bool generateWaterMultipleScatteringLUT(const std::string &outputPath, int depthRes, int muRes);
 
     // ==================================
     // Initialization (call AFTER OpenGL init)
@@ -174,8 +154,8 @@ public:
     // Rendering
     // ==================================
 
-    // Draw Earth as a textured sphere with atmosphere
-    // cameraPos: camera position in world space (needed for atmosphere)
+    // Draw Earth as a textured sphere
+    // cameraPos: camera position in world space
     // moonDirection: direction to moon (for moonlight illumination)
     void draw(const glm::vec3 &position,
               float displayRadius,
@@ -189,17 +169,50 @@ public:
     // Get the current month (1-12) for a given Julian Date
     static int getMonthFromJulianDate(double julianDate);
 
+    // Set camera info for geometry culling (call before rendering each frame)
+    static void setCameraInfo(const glm::vec3 &cameraPos, const glm::vec3 &cameraDir, float fovRadians);
+
+    // Set screen dimensions for occlusion culling
+    static void setScreenDimensions(int width, int height);
+
+    // Calculate dynamic tessellation based on camera distance
+    // Returns (baseSlices, baseStacks, localSlices, localStacks) tuple and closest point on sphere to camera
+    // baseSlices/baseStacks: tessellation for regions outside the local high-detail area
+    // localSlices/localStacks: tessellation for the circular region (radius = 0.25 * planet radius) around closest point
+    static std::tuple<int, int, int, int> calculateTessellation(const glm::vec3 &spherePosition,
+                                                                float sphereRadius,
+                                                                const glm::vec3 &cameraPos,
+                                                                glm::vec3 &closestPointOnSphere);
+
 private:
     // Generate sphere geometry with proper UV mapping
+    // cameraPos: camera position for back-face and frustum culling
+    // cameraDir: camera forward direction for frustum culling
+    // fovRadians: camera field of view in radians for frustum culling
     static void drawTexturedSphere(const glm::vec3 &position,
                                    float radius,
                                    const glm::vec3 &poleDir,
                                    const glm::vec3 &primeDir,
-                                   int slices,
-                                   int stacks);
+                                   int baseSlices,
+                                   int baseStacks,
+                                   int localSlices,
+                                   int localStacks,
+                                   const glm::vec3 &cameraPos,
+                                   const glm::vec3 &cameraDir,
+                                   float fovRadians,
+                                   bool disableCulling = false,
+                                   bool enableOcclusionCulling = false,
+                                   const glm::vec3 &closestPointOnSphere = glm::vec3(0.0f),
+                                   GLint uniformFlatCircleMode = -1,
+                                   GLint uniformSphereCenter = -1,
+                                   GLint uniformSphereRadius = -1,
+                                   GLint uniformBillboardCenter = -1);
 
     // Load a single texture from file into OpenGL
     GLuint loadTexture(const std::string &filepath);
+
+    // Load wind texture (2-channel RG format) - specialized for wind force vectors
+    GLuint loadWindTexture(const std::string &filepath);
 
     // Cleanup all textures
     void cleanup();
@@ -291,17 +304,14 @@ private:
     GLuint combinedNormalTexture_;
     bool combinedNormalLoaded_;
 
-    // Water scattering LUTs (Participating Media Architecture)
-    GLuint waterTransmittanceLUT_; // T_water(z, μ) - 2D transmittance
-    GLuint waterSingleScatterLUT_; // S1_water(z, μ, μ_s) - 3D single scattering (packed as 2D)
-    GLuint waterMultiscatterLUT_;  // Sm_water(z, μ) - 2D multiple scattering
-    bool waterTransmittanceLUTLoaded_;
-    bool waterSingleScatterLUTLoaded_;
-    bool waterMultiscatterLUTLoaded_;
-
     // Nightlights texture (VIIRS Black Marble - city lights at night)
     GLuint nightlightsTexture_;
     bool nightlightsLoaded_;
+
+    // Wind textures (12 separate 2D textures, one per month)
+    // RG channels = u, v wind components (normalized to [-1, 1])
+    std::array<GLuint, MONTHS_PER_YEAR> windTextures_;
+    std::array<bool, MONTHS_PER_YEAR> windTexturesLoaded_;
 
     // Initialization state
     bool initialized_;
@@ -325,9 +335,10 @@ private:
     GLint uniformColorTexture2_; // Second texture for blending
     GLint uniformBlendFactor_;   // 0.0 = Texture1, 1.0 = Texture2
     GLint uniformNormalMap_;
-    GLint uniformHeightmap_;    // Landmass heightmap texture
-    GLint uniformUseHeightmap_; // Enable/disable heightmap effect
-    GLint uniformUseSpecular_;  // Enable/disable specular/roughness effect
+    GLint uniformHeightmap_;       // Landmass heightmap texture
+    GLint uniformUseHeightmap_;    // Enable/disable heightmap effect
+    GLint uniformUseDisplacement_; // Enable/disable vertex displacement
+    GLint uniformUseSpecular_;     // Enable/disable specular/roughness effect
     GLint uniformLightDir_;
     GLint uniformLightColor_;
     GLint uniformMoonDir_;   // Moon direction (for moonlight)
@@ -335,25 +346,33 @@ private:
     GLint uniformAmbientColor_;
     GLint uniformPoleDir_;
     GLint uniformUseNormalMap_;
-    GLint uniformNightlights_;           // Nightlights texture (grayscale, city lights)
-    GLint uniformTime_;                  // Julian date for animated noise
-    GLint uniformMicroNoise_;            // Micro flicker noise texture
-    GLint uniformHourlyNoise_;           // Hourly variation noise texture
-    GLint uniformSpecular_;              // Surface specular/roughness texture (grayscale)
-    GLint uniformIceMask_;               // Ice mask texture (current month)
-    GLint uniformIceMask2_;              // Ice mask texture (next month for blending)
-    GLint uniformIceBlendFactor_;        // Blend factor between ice masks
-    GLint uniformLandmassMask_;          // Landmass mask texture (land=white, ocean=black)
-    GLint uniformCameraPos_;             // Camera position for view direction calculations
-    GLint uniformBathymetryDepth_;       // Ocean floor depth texture (0=surface,
-                                         // 255=deepest)
-    GLint uniformBathymetryNormal_;      // Ocean floor normal map
-    GLint uniformCombinedNormal_;        // Combined normal map (landmass + bathymetry) for shadows
-    GLint uniformWaterTransmittanceLUT_; // T_water transmittance LUT texture
-    GLint uniformWaterSingleScatterLUT_; // S1_water single scattering LUT texture
-    GLint uniformWaterMultiscatterLUT_;  // Sm_water multiple scattering LUT texture
-    GLint uniformUseWaterScatteringLUT_; // Whether to use water scattering LUTs
-    GLint uniformPlanetRadius_;          // Planet radius for WGS 84 oblateness
+    GLint uniformNightlights_;       // Nightlights texture (grayscale, city lights)
+    GLint uniformTime_;              // Julian date for animated noise
+    GLint uniformMicroNoise_;        // Micro flicker noise texture
+    GLint uniformHourlyNoise_;       // Hourly variation noise texture
+    GLint uniformSpecular_;          // Surface specular/roughness texture (grayscale)
+    GLint uniformIceMask_;           // Ice mask texture (current month)
+    GLint uniformIceMask2_;          // Ice mask texture (next month for blending)
+    GLint uniformIceBlendFactor_;    // Blend factor between ice masks
+    GLint uniformLandmassMask_;      // Landmass mask texture (land=white, ocean=black)
+    GLint uniformCameraPos_;         // Camera position for view direction calculations
+    GLint uniformCameraDir_;         // Camera forward direction
+    GLint uniformCameraFOV_;         // Camera field of view (radians)
+    GLint uniformPrimeMeridianDir_;  // Planet's prime meridian direction
+    GLint uniformBathymetryDepth_;   // Ocean floor depth texture (0=surface,
+                                     // 255=deepest)
+    GLint uniformBathymetryNormal_;  // Ocean floor normal map
+    GLint uniformCombinedNormal_;    // Combined normal map (landmass + bathymetry) for shadows
+    GLint uniformWindTexture1_;      // Wind texture for current month (RG = u,v components)
+    GLint uniformWindTexture2_;      // Wind texture for next month (RG = u,v components)
+    GLint uniformWindBlendFactor_;   // Blend factor between current and next month (0-1)
+    GLint uniformWindTextureSize_;   // Wind texture resolution (width, height) for UV normalization
+    GLint uniformPlanetRadius_;      // Planet radius for WGS 84 oblateness
+    GLint uniformFlatCircleMode_;    // 1 = rendering flat circle, 0 = normal sphere
+    GLint uniformSphereCenter_;      // Sphere center position (for flat circle projection)
+    GLint uniformSphereRadius_;      // Sphere radius (for flat circle projection)
+    GLint uniformBillboardCenter_;   // Billboard center position (closest point on sphere to camera)
+    GLint uniformDisplacementScale_; // Multiplier to scale vertex displacement for visibility
 
     // Initialize surface shader (earth-vertex.glsl + earth-fragment.glsl)
     bool initializeSurfaceShader();
@@ -367,7 +386,6 @@ private:
     void generateNoiseTextures();
 
     // Initialize shaders (called from initialize())
-    // Calls both initializeSurfaceShader() and initializeAtmosphereShader()
     bool initializeShaders();
 
     // Compile a shader from source
@@ -376,101 +394,8 @@ private:
     // Link vertex and fragment shaders into a program
     static GLuint linkProgram(GLuint vertexShader, GLuint fragmentShader);
 
-    // ==================================
-    // Atmospheric scattering
-    // ==================================
-
-    // Atmosphere shader program
-    GLuint atmosphereProgram_;
-    bool atmosphereAvailable_;
-
-    // Atmosphere density lookup texture (1D: altitude -> density)
-    // Loaded from US Standard Atmosphere xlsx data
-    GLuint atmosphereDensityTexture_;
-    bool atmosphereDataLoaded_;
-    float atmosphereMaxAltitude_; // Maximum altitude in meters for texture lookup
-
-    // Atmosphere transmittance LUT (2D: Bruneton r, mu_s)
-    // Precomputed to avoid ray marching transmittance every frame
-    GLuint atmosphereTransmittanceLUT_;
-    bool atmosphereTransmittanceLUTLoaded_;
-
-    // Atmosphere multiscatter LUT (2D: Hillaire r, mu_s)
-    // Precomputed iterative energy redistribution for multiscattering
-    GLuint atmosphereMultiscatterLUT_;
-    bool atmosphereMultiscatterLUTLoaded_;
-
-    // Atmosphere uniform locations (fullscreen ray march)
-    GLint uniformAtmoInvViewProj_; // Inverse(Projection * View) for ray
-                                   // reconstruction
-    GLint uniformAtmoCameraPos_;
-    GLint uniformAtmoSunDir_;
-    GLint uniformAtmoPlanetPos_;
-    GLint uniformAtmoPlanetRadius_;
-    GLint uniformAtmoAtmosphereRadius_;
-    GLint uniformAtmoDensityTex_;          // 1D density lookup texture
-    GLint uniformAtmoMaxAltitude_;         // Maximum altitude for texture normalization
-    GLint uniformAtmoTransmittanceLUT_;    // 2D transmittance LUT texture
-    GLint uniformAtmoUseTransmittanceLUT_; // Whether to use transmittance LUT
-    GLint uniformAtmoMultiscatterLUT_;     // 2D multiscatter LUT texture
-    GLint uniformAtmoUseMultiscatterLUT_;  // Whether to use multiscatter LUT
-
-    // Load atmosphere data from xlsx file
-    bool loadAtmosphereData(const std::string &xlsxPath);
-
-    // Load precomputed transmittance LUT texture
-    bool loadAtmosphereTransmittanceLUT(const std::string &lutPath);
-
-    // Load precomputed multiscatter LUT texture
-    bool loadAtmosphereMultiscatterLUT(const std::string &lutPath);
-
-    // Load precomputed water scattering LUT textures
-    bool loadWaterTransmittanceLUT(const std::string &lutPath);
-    bool loadWaterSingleScatterLUT(const std::string &lutPath);
-    bool loadWaterMultiscatterLUT(const std::string &lutPath);
-    bool loadWaterScatteringLUT(const std::string &lutPath);
-
-    // Initialize atmosphere shader
-    bool initializeAtmosphereShader();
-
-    // Draw atmosphere as fullscreen ray-marched pass
-    // Renders volumetric scattering effect around Earth using analytic atmosphere
-    // The atmosphere is a mathematical volume, not geometry - this is the correct
-    // approach
-    void drawAtmosphere(const glm::vec3 &planetPos,
-                        float planetRadius,
-                        float atmosphereRadius,
-                        const glm::vec3 &cameraPos,
-                        const glm::vec3 &sunDir) const;
 
 public:
-    // ==================================
-    // Debugging
-    // ==================================
-
-    // Draw visual debugging elements for the atmosphere (rings and labels)
-    void drawAtmosphereDebug(const glm::vec3 &planetPos, float planetRadius, const glm::vec3 &cameraPos);
-
-    // Toggle atmosphere layers debug visualization
-    void setShowAtmosphereLayers(bool show)
-    {
-        showAtmosphereLayers_ = show;
-    }
-    bool getShowAtmosphereLayers() const
-    {
-        return showAtmosphereLayers_;
-    }
-
-    // Toggle atmosphere rendering (fullscreen ray march)
-    void setEnableAtmosphere(bool enable)
-    {
-        enableAtmosphere_ = enable;
-    }
-    bool getEnableAtmosphere() const
-    {
-        return enableAtmosphere_;
-    }
-
     // Get elevation data loading status
     bool getElevationLoaded() const
     {
@@ -511,6 +436,15 @@ public:
         return useSpecular_;
     }
 
+    // Draw wireframe version of Earth (for wireframe overlay mode)
+    // Renders the same geometry as draw() but without shaders, so glPolygonMode works
+    void drawWireframe(const glm::vec3 &position,
+                       float displayRadius,
+                       const glm::vec3 &poleDirection,
+                       const glm::vec3 &primeMeridianDirection,
+                       double julianDate,
+                       const glm::vec3 &cameraPos);
+
 private:
     // Draw a wireframe ring
     void drawDebugRing(const glm::vec3 &center, float radius, const glm::vec3 &color);
@@ -523,11 +457,9 @@ private:
                            const glm::vec3 &cameraPos,
                            float targetPixelSize = DEFAULT_TEXT_PIXEL_SIZE);
 
-    bool showAtmosphereLayers_ = false; // Default to false, synced with g_showAtmosphereLayers
-    bool enableAtmosphere_ = false;     // Enable/disable atmosphere rendering (default disabled)
-    bool useHeightmap_ = true;          // Enable/disable heightmap effect (default enabled)
-    bool useNormalMap_ = true;          // Enable/disable normal map (default enabled)
-    bool useSpecular_ = true;           // Enable/disable specular/roughness effect (default enabled)
+    bool useHeightmap_ = true; // Enable/disable heightmap effect (default enabled)
+    bool useNormalMap_ = true; // Enable/disable normal map (default enabled)
+    bool useSpecular_ = true;  // Enable/disable specular/roughness effect (default enabled)
 };
 
 // ==================================

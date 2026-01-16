@@ -23,9 +23,22 @@ PFNGLDELETEPROGRAMPROC glDeleteProgram = nullptr;
 PFNGLGETUNIFORMLOCATIONPROC glGetUniformLocation = nullptr;
 PFNGLUNIFORM1IPROC glUniform1i = nullptr;
 PFNGLUNIFORM1FPROC glUniform1f = nullptr;
+PFNGLUNIFORM2FPROC glUniform2f = nullptr;
 PFNGLUNIFORM3FPROC glUniform3f = nullptr;
 PFNGLUNIFORMMATRIX4FVPROC glUniformMatrix4fv = nullptr;
 PFNGLACTIVETEXTUREPROC glActiveTexture_ptr = nullptr;
+PFNGLTEXIMAGE3DPROC glTexImage3D = nullptr;
+PFNGLTEXSUBIMAGE3DPROC glTexSubImage3D = nullptr;
+PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers = nullptr;
+PFNGLBINDFRAMEBUFFERPROC glBindFramebuffer = nullptr;
+PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D = nullptr;
+PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatus = nullptr;
+PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers = nullptr;
+PFNGLGENRENDERBUFFERSPROC glGenRenderbuffers = nullptr;
+PFNGLBINDRENDERBUFFERPROC glBindRenderbuffer = nullptr;
+PFNGLRENDERBUFFERSTORAGEPROC glRenderbufferStorage = nullptr;
+PFNGLFRAMEBUFFERRENDERBUFFERPROC glFramebufferRenderbuffer = nullptr;
+PFNGLDELETERENDERBUFFERSPROC glDeleteRenderbuffers = nullptr;
 // NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
 
 namespace
@@ -69,15 +82,29 @@ bool loadGLExtensions()
     glGetUniformLocation = glfwGetProcAddressCast<PFNGLGETUNIFORMLOCATIONPROC>("glGetUniformLocation");
     glUniform1i = glfwGetProcAddressCast<PFNGLUNIFORM1IPROC>("glUniform1i");
     glUniform1f = glfwGetProcAddressCast<PFNGLUNIFORM1FPROC>("glUniform1f");
+    glUniform2f = glfwGetProcAddressCast<PFNGLUNIFORM2FPROC>("glUniform2f");
     glUniform3f = glfwGetProcAddressCast<PFNGLUNIFORM3FPROC>("glUniform3f");
     glUniformMatrix4fv = glfwGetProcAddressCast<PFNGLUNIFORMMATRIX4FVPROC>("glUniformMatrix4fv");
     glActiveTexture_ptr = glfwGetProcAddressCast<PFNGLACTIVETEXTUREPROC>("glActiveTexture");
+    glTexImage3D = glfwGetProcAddressCast<PFNGLTEXIMAGE3DPROC>("glTexImage3D");
+    glTexSubImage3D = glfwGetProcAddressCast<PFNGLTEXSUBIMAGE3DPROC>("glTexSubImage3D");
+    glGenFramebuffers = glfwGetProcAddressCast<PFNGLGENFRAMEBUFFERSPROC>("glGenFramebuffers");
+    glBindFramebuffer = glfwGetProcAddressCast<PFNGLBINDFRAMEBUFFERPROC>("glBindFramebuffer");
+    glFramebufferTexture2D = glfwGetProcAddressCast<PFNGLFRAMEBUFFERTEXTURE2DPROC>("glFramebufferTexture2D");
+    glCheckFramebufferStatus = glfwGetProcAddressCast<PFNGLCHECKFRAMEBUFFERSTATUSPROC>("glCheckFramebufferStatus");
+    glDeleteFramebuffers = glfwGetProcAddressCast<PFNGLDELETEFRAMEBUFFERSPROC>("glDeleteFramebuffers");
+    glGenRenderbuffers = glfwGetProcAddressCast<PFNGLGENRENDERBUFFERSPROC>("glGenRenderbuffers");
+    glBindRenderbuffer = glfwGetProcAddressCast<PFNGLBINDRENDERBUFFERPROC>("glBindRenderbuffer");
+    glRenderbufferStorage = glfwGetProcAddressCast<PFNGLRENDERBUFFERSTORAGEPROC>("glRenderbufferStorage");
+    glFramebufferRenderbuffer = glfwGetProcAddressCast<PFNGLFRAMEBUFFERRENDERBUFFERPROC>("glFramebufferRenderbuffer");
+    glDeleteRenderbuffers = glfwGetProcAddressCast<PFNGLDELETERENDERBUFFERSPROC>("glDeleteRenderbuffers");
 
     glExtensionsLoaded = (glCreateShader != nullptr && glShaderSource != nullptr && glCompileShader != nullptr &&
                           glGetShaderiv != nullptr && glCreateProgram != nullptr && glAttachShader != nullptr &&
                           glLinkProgram != nullptr && glUseProgram != nullptr && glGetUniformLocation != nullptr &&
                           glUniform1i != nullptr && glUniform3f != nullptr && glUniformMatrix4fv != nullptr &&
-                          glActiveTexture_ptr != nullptr);
+                          glActiveTexture_ptr != nullptr && glGenFramebuffers != nullptr && glBindFramebuffer != nullptr &&
+                          glFramebufferTexture2D != nullptr && glCheckFramebufferStatus != nullptr);
 
     if (!glExtensionsLoaded)
     {

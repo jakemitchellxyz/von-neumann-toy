@@ -1,8 +1,9 @@
 #pragma once
 
+#include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <string>
-#include <GLFW/glfw3.h>
+
 
 // Forward declaration
 enum class TextureResolution;
@@ -16,13 +17,16 @@ enum class TextureResolution;
 //
 // Note: SKYBOX_RADIUS is defined in constants.h (50000.0f)
 
-// Global flag to control constellation visibility (toggled via UI)
+// Global flags to control skybox layer visibility (toggled via UI)
 extern bool g_showConstellations;
+extern bool g_showCelestialGrid;
+extern bool g_showConstellationFigures;
+extern bool g_showConstellationBounds;
 
 // Initialize the skybox system - loads star catalog and constellation files
 // Must be called before DrawSkybox
 // defaultsPath: Path to the defaults directory
-void InitializeSkybox(const std::string& defaultsPath = "defaults");
+void InitializeSkybox(const std::string &defaultsPath = "defaults");
 
 // Check if skybox has been initialized
 bool IsSkyboxInitialized();
@@ -31,44 +35,47 @@ bool IsSkyboxInitialized();
 // Star Texture Generation (Pre-computation)
 // ==================================
 
-// Generate star texture at startup (call BEFORE render loop, after Earth textures)
-// This pre-computes all star positions into an equirectangular HDR texture
-// defaultsPath: path to defaults folder (for star catalog)
-// outputPath: where to save the generated texture (e.g., "star-textures")
-// resolution: texture resolution setting (Low=2K, Medium=4K, High/Ultra=8K)
-// jd: Julian Date for star positions (proper motion)
-// Returns: number of stars rendered, or -1 on failure
-int GenerateStarTexture(const std::string& defaultsPath,
-                        const std::string& outputPath,
-                        TextureResolution resolution,
-                        double jd);
+// Preprocess all skybox textures (TIF and EXR files)
+// Loads textures from defaults/celestial-skybox/ and resizes them to 2x the user's selected resolution
+// defaultsPath: path to defaults folder (for celestial-skybox/ directory)
+// outputPath: where to save the processed textures (e.g., "celestial-skybox")
+// resolution: texture resolution setting (output will be 2x this resolution)
+// Returns: true if successful or already cached
+bool PreprocessSkyboxTextures(const std::string &defaultsPath,
+                              const std::string &outputPath,
+                              TextureResolution resolution);
+
+// Legacy function name - now calls PreprocessSkyboxTextures
+// Preprocess constellation figures texture
+// Loads the 32k TIF file and resizes it to 2x the user's selected resolution
+// defaultsPath: path to defaults folder (for constellation_figures_32k.tif)
+// outputPath: where to save the processed texture (e.g., "celestial-skybox")
+// resolution: texture resolution setting (output will be 2x this resolution)
+// Returns: true if successful or already cached
+bool PreprocessConstellationTexture(const std::string &defaultsPath,
+                                    const std::string &outputPath,
+                                    TextureResolution resolution);
+
 
 // Initialize the star texture material (load pre-generated texture into OpenGL)
 // Call after OpenGL context is created
 // texturePath: path to generated star texture folder
 // resolution: texture resolution setting
 // Returns: true if texture loaded successfully
-bool InitializeStarTextureMaterial(const std::string& texturePath, TextureResolution resolution);
+bool InitializeStarTextureMaterial(const std::string &texturePath, TextureResolution resolution);
 
 // Check if star texture material is ready
 bool IsStarTextureReady();
 
 // Draw the skybox using pre-computed texture (emissive material)
 // cameraPos: current camera position (skybox is centered on camera)
-void DrawSkyboxTextured(const glm::vec3& cameraPos);
+void DrawSkyboxTextured(const glm::vec3 &cameraPos);
 
-// ==================================
-// Legacy Dynamic Rendering (fallback)
-// ==================================
+// Draw wireframe version of skybox (for wireframe overlay mode)
+// Renders the same geometry as DrawSkyboxTextured but without shaders
+// cameraPos: current camera position (skybox is centered on camera)
+void DrawSkyboxWireframe(const glm::vec3 &cameraPos);
 
-// Draw the skybox dynamically (stars computed each frame)
-// cameraPos: Current camera position in world space
-// jd: Current Julian Date for calculating star positions (proper motion)
-// cameraFront: Camera forward direction (for billboard orientation)
-// cameraUp: Camera up direction (for billboard orientation)
-void DrawSkybox(const glm::vec3& cameraPos, double jd,
-                const glm::vec3& cameraFront = glm::vec3(0.0f, 0.0f, -1.0f),
-                const glm::vec3& cameraUp = glm::vec3(0.0f, 1.0f, 0.0f));
 
 // Convert Right Ascension (hours) and Declination (degrees) to 3D Cartesian
 // Uses proper coordinate transformation: J2000 equatorial -> J2000 ecliptic -> display
