@@ -30,33 +30,34 @@ static float g_cameraFovRadians = 60.0f * 3.14159265358979323846f / 180.0f; // 6
 
 void initialize()
 {
+    // TODO: Migrate solar lighting to Vulkan
     // Enable lighting
-    glEnable(GL_LIGHTING);
-    glEnable(GL_LIGHT0);
-    glEnable(GL_COLOR_MATERIAL);
-    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
-    glShadeModel(GL_SMOOTH);
-    glEnable(GL_NORMALIZE);
+    // glEnable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
+    // glEnable(GL_LIGHT0); // REMOVED - migrate to Vulkan
+    // glEnable(GL_COLOR_MATERIAL); // REMOVED - migrate to Vulkan
+    // glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE); // REMOVED - migrate to Vulkan
+    // glShadeModel(GL_SMOOTH); // REMOVED - migrate to Vulkan
+    // glEnable(GL_NORMALIZE); // REMOVED - migrate to Vulkan
 
     // CRITICAL: Disable OpenGL's global ambient light model
     // By default, OpenGL has a small global ambient (0.2, 0.2, 0.2)
     // This makes all surfaces lit even without any light source
     GLfloat noGlobalAmbient[] = {0.0f, 0.0f, 0.0f, 1.0f};
-    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, noGlobalAmbient);
+    // glLightModelfv(GL_LIGHT_MODEL_AMBIENT, noGlobalAmbient); // REMOVED - migrate to Vulkan uniform buffer
 
     // Set up base light properties
     // These will be modified per-body based on distance
     GLfloat ambientLight[] = {AMBIENT_LEVEL, AMBIENT_LEVEL, AMBIENT_LEVEL, 1.0f};
-    glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight);
+    // glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight); // REMOVED - migrate to Vulkan uniform buffer
 
     // No specular - Sun is the only light source, keep it simple
     GLfloat specularLight[] = {0.0f, 0.0f, 0.0f, 1.0f};
-    glLightfv(GL_LIGHT0, GL_SPECULAR, specularLight);
+    // glLightfv(GL_LIGHT0, GL_SPECULAR, specularLight); // REMOVED - migrate to Vulkan uniform buffer
 
     // No attenuation in OpenGL's model - we handle it manually
-    glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 1.0f);
-    glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION, 0.0f);
-    glLightf(GL_LIGHT0, GL_QUADRATIC_ATTENUATION, 0.0f);
+    // glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 1.0f); // REMOVED - migrate to Vulkan uniform buffer
+    // glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION, 0.0f); // REMOVED - migrate to Vulkan uniform buffer
+    // glLightf(GL_LIGHT0, GL_QUADRATIC_ATTENUATION, 0.0f); // REMOVED - migrate to Vulkan uniform buffer
 }
 
 // ============================================================================
@@ -169,21 +170,22 @@ void setupLightingForBody(const glm::vec3 &bodyPosition, float distanceScale)
     glm::vec3 lightDir = -lightTravelDir; // Negate to point FROM body TO sun
 
     // Set up DIRECTIONAL light (not point light)
+    // TODO: Migrate solar lighting to Vulkan
     // In OpenGL, w=0.0 means directional light
     // The xyz components point FROM the surface TOWARD the light source
     GLfloat lightDirGL[] = {lightDir.x, lightDir.y, lightDir.z, 0.0f};
-    glLightfv(GL_LIGHT0, GL_POSITION, lightDirGL);
+    // glLightfv(GL_LIGHT0, GL_POSITION, lightDirGL); // REMOVED - migrate to Vulkan uniform buffer
 
     // Calculate intensity based on distance (inverse square falloff)
     float intensity = calculateIntensity(distance, distanceScale);
 
     // Apply sun color with intensity
     GLfloat diffuseLight[] = {SUN_COLOR.r * intensity, SUN_COLOR.g * intensity, SUN_COLOR.b * intensity, 1.0f};
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, diffuseLight);
+    // glLightfv(GL_LIGHT0, GL_DIFFUSE, diffuseLight); // REMOVED - migrate to Vulkan uniform buffer
 
     // Ambient remains low and constant (represents scattered light)
     GLfloat ambientLight[] = {AMBIENT_LEVEL, AMBIENT_LEVEL, AMBIENT_LEVEL, 1.0f};
-    glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight);
+    // glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight); // REMOVED - migrate to Vulkan uniform buffer
 }
 
 // ============================================================================
@@ -197,11 +199,12 @@ void drawEmissiveSphere(const glm::vec3 &center, float radius, const glm::vec3 &
     glDisable(GL_LIGHTING);
     glDisable(GL_LIGHT0);
 
+    // TODO: Migrate solar lighting rendering to Vulkan
     // Set emissive color directly
-    glColor3f(emissiveColor.r, emissiveColor.g, emissiveColor.b);
+    // glColor3f(emissiveColor.r, emissiveColor.g, emissiveColor.b); // REMOVED - migrate to Vulkan uniform buffer
 
-    glPushMatrix();
-    glTranslatef(center.x, center.y, center.z);
+    // glPushMatrix(); // REMOVED - migrate to Vulkan (matrices in uniform buffers)
+    // glTranslatef(center.x, center.y, center.z); // REMOVED - migrate to Vulkan (matrices in uniform buffers)
 
     const float PI = 3.14159265358979323846f;
 
@@ -215,7 +218,7 @@ void drawEmissiveSphere(const glm::vec3 &center, float radius, const glm::vec3 &
         float r1 = radius * cos(phi1);
         float r2 = radius * cos(phi2);
 
-        glBegin(GL_TRIANGLE_STRIP);
+        // glBegin(GL_TRIANGLE_STRIP); // REMOVED - migrate to Vulkan
         for (int j = 0; j <= slices; ++j)
         {
             float theta = 2.0f * PI * static_cast<float>(j) / slices;
@@ -224,16 +227,16 @@ void drawEmissiveSphere(const glm::vec3 &center, float radius, const glm::vec3 &
 
             float x1 = r1 * cosTheta;
             float z1 = r1 * sinTheta;
-            glVertex3f(x1, y1, z1);
+            // glVertex3f(x1, y1, z1); // REMOVED - migrate to Vulkan vertex buffer
 
             float x2 = r2 * cosTheta;
             float z2 = r2 * sinTheta;
-            glVertex3f(x2, y2, z2);
+            // glVertex3f(x2, y2, z2); // REMOVED - migrate to Vulkan vertex buffer
         }
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
     }
 
-    glPopMatrix();
+    // glPopMatrix(); // REMOVED - migrate to Vulkan (matrices in uniform buffers)
 
     // Re-enable lighting for subsequent draws (unless in wireframe mode)
     if (!g_showWireframe)
@@ -445,22 +448,23 @@ void drawOrientedLitSphere(const glm::vec3 &center,
             {
                 if (!stripActive)
                 {
-                    glBegin(GL_TRIANGLE_STRIP);
+                    // glBegin(GL_TRIANGLE_STRIP); // REMOVED - migrate to Vulkan
                     stripActive = true;
                 }
 
+                // TODO: Migrate solar lighting rendering to Vulkan
                 // In wireframe mode, ensure color is set explicitly (not affected by material)
                 if (disableCulling) // disableCulling is true in wireframe mode
                 {
-                    glColor3f(0.8f, 0.9f, 1.0f);
+                    // glColor3f(0.8f, 0.9f, 1.0f); // REMOVED - migrate to Vulkan uniform buffer
                 }
 
-                glNormal3f(localDir1.x, localDir1.y, localDir1.z);
-                glVertex3f(worldPos1.x - center.x, worldPos1.y - center.y, worldPos1.z - center.z);
+                // glNormal3f(localDir1.x, localDir1.y, localDir1.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(worldPos1.x - center.x, worldPos1.y - center.y, worldPos1.z - center.z); // REMOVED - migrate to Vulkan vertex buffer
                 stripVertexCount++;
 
-                glNormal3f(localDir2.x, localDir2.y, localDir2.z);
-                glVertex3f(worldPos2.x - center.x, worldPos2.y - center.y, worldPos2.z - center.z);
+                // glNormal3f(localDir2.x, localDir2.y, localDir2.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(worldPos2.x - center.x, worldPos2.y - center.y, worldPos2.z - center.z); // REMOVED - migrate to Vulkan vertex buffer
                 stripVertexCount++;
 
                 // Store current pair as previous for next iteration
@@ -487,7 +491,7 @@ void drawOrientedLitSphere(const glm::vec3 &center,
         // End strip if still active
         if (stripActive)
         {
-            glEnd();
+            // glEnd(); // REMOVED - migrate to Vulkan
             if (stripVertexCount >= 2)
             {
                 CountTriangles(GL_TRIANGLE_STRIP, stripVertexCount);
@@ -495,7 +499,7 @@ void drawOrientedLitSphere(const glm::vec3 &center,
         }
     }
 
-    glPopMatrix();
+    // glPopMatrix(); // REMOVED - migrate to Vulkan (matrices in uniform buffers)
 }
 
 // Calculate dynamic tessellation based on camera distance for celestial bodies

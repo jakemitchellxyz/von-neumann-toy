@@ -40,6 +40,9 @@ static double g_validEndJD = J2000_JD + 36525.0;    // ~100 years after J2000
 // Track which bodies have data
 static std::map<int, bool> g_bodyHasData;
 
+// List of all bodies discovered with ephemeris data
+static std::vector<BodyInfo> g_availableBodies;
+
 #ifdef HAS_CSPICE
 
 // List of loaded SPK files for coverage checking
@@ -178,57 +181,35 @@ bool initialize(const std::string& kernelDir) {
     }
 
     g_initialized = true;
+    g_availableBodies.clear();
     std::cout << "SPICE: Initialized with " << kernelsLoaded << " kernel(s)" << std::endl;
 
     // ==================================
-    // Check coverage for all required bodies
+    // Discover all bodies with ephemeris data
     // ==================================
-    std::cout << "\nSPICE: Checking ephemeris coverage for each body...\n";
+    std::cout << "\nSPICE: Discovering bodies with ephemeris data...\n";
     
-    struct BodyInfo {
+    // Bodies to check (NAIF ID, name) - these are common solar system bodies
+    struct BodyCheck {
         int naifId;
         const char* name;
     };
     
-    // Use barycenter IDs for planets (these are in de440.bsp with full coverage)
-    BodyInfo requiredBodies[] = {
+    BodyCheck bodiesToCheck[] = {
+        // Sun
         {NAIF_SUN, "Sun"},
-        {NAIF_MERCURY, "Mercury"},   // Barycenter ID 1
-        {NAIF_VENUS, "Venus"},       // Barycenter ID 2
-        {NAIF_EARTH, "Earth"},       // Planet center 399 (for Moon offset)
-        {NAIF_MOON, "Moon"},         // ID 301
-        {NAIF_MARS, "Mars"},         // Barycenter ID 4
-        {NAIF_JUPITER, "Jupiter"},   // Barycenter ID 5
-        {NAIF_SATURN, "Saturn"},     // Barycenter ID 6
-        {NAIF_URANUS, "Uranus"},     // Barycenter ID 7
-        {NAIF_NEPTUNE, "Neptune"},   // Barycenter ID 8
-        {NAIF_PLUTO, "Pluto"},       // Barycenter ID 9
-    };
-    
-    double overallStart = -1e20;
-    double overallEnd = 1e20;
-    
-    for (const auto& body : requiredBodies) {
-        double startET, endET;
-        if (checkBodyCoverage(body.naifId, startET, endET)) {
-            g_bodyHasData[body.naifId] = true;
-            
-            std::string startStr = etToDateString(startET);
-            std::string endStr = etToDateString(endET);
-            std::cout << "  " << body.name << " (ID " << body.naifId << "): " 
-                      << startStr << " to " << endStr << std::endl;
-            
-            // Compute intersection (latest start, earliest end)
-            overallStart = std::max(overallStart, startET);
-            overallEnd = std::min(overallEnd, endET);
-        } else {
-            g_bodyHasData[body.naifId] = false;
-            std::cout << "  " << body.name << " (ID " << body.naifId << "): NO DATA\n";
-        }
-    }
-    
-    // Check major moons (optional)
-    BodyInfo optionalMoons[] = {
+        // Planets (using barycenters for most, 399 for Earth to get Moon offset)
+        {NAIF_MERCURY, "Mercury"},
+        {NAIF_VENUS, "Venus"},
+        {NAIF_EARTH, "Earth"},
+        {NAIF_MARS, "Mars"},
+        {NAIF_JUPITER, "Jupiter"},
+        {NAIF_SATURN, "Saturn"},
+        {NAIF_URANUS, "Uranus"},
+        {NAIF_NEPTUNE, "Neptune"},
+        {NAIF_PLUTO, "Pluto"},
+        // Major moons
+        {NAIF_MOON, "Moon"},
         {NAIF_IO, "Io"},
         {NAIF_EUROPA, "Europa"},
         {NAIF_GANYMEDE, "Ganymede"},
@@ -238,20 +219,44 @@ bool initialize(const std::string& kernelDir) {
         {NAIF_CHARON, "Charon"},
     };
     
-    std::cout << "\nSPICE: Optional moon coverage:\n";
-    for (const auto& moon : optionalMoons) {
+    double overallStart = -1e20;
+    double overallEnd = 1e20;
+    
+    for (const auto& check : bodiesToCheck) {
         double startET, endET;
-        if (checkBodyCoverage(moon.naifId, startET, endET)) {
-            g_bodyHasData[moon.naifId] = true;
+        if (checkBodyCoverage(check.naifId, startET, endET)) {
+            g_bodyHasData[check.naifId] = true;
+            
+            // Get radius from PCK if available
+            double radiusKm = getBodyMeanRadius(check.naifId);
+            
+            // Add to available bodies list
+            BodyInfo info;
+            info.naifId = check.naifId;
+            info.name = check.name;
+            info.radiusKm = radiusKm;
+            g_availableBodies.push_back(info);
+            
             std::string startStr = etToDateString(startET);
             std::string endStr = etToDateString(endET);
-            std::cout << "  " << moon.name << " (ID " << moon.naifId << "): " 
-                      << startStr << " to " << endStr << std::endl;
+            std::cout << "  " << check.name << " (ID " << check.naifId << "): " 
+                      << startStr << " to " << endStr;
+            if (radiusKm > 0) {
+                std::cout << " [radius: " << radiusKm << " km]";
+            }
+            std::cout << std::endl;
+            
+            // Compute intersection for planets (not moons) for valid time range
+            if (check.naifId <= 10 || check.naifId == 399) {
+                overallStart = std::max(overallStart, startET);
+                overallEnd = std::min(overallEnd, endET);
+            }
         } else {
-            g_bodyHasData[moon.naifId] = false;
-            std::cout << "  " << moon.name << " (ID " << moon.naifId << "): NO DATA (will use orbit approximation)\n";
+            g_bodyHasData[check.naifId] = false;
         }
     }
+    
+    std::cout << "\nSPICE: Found " << g_availableBodies.size() << " bodies with ephemeris data\n";
     
     // Store computed valid range
     if (overallStart < overallEnd) {
@@ -260,12 +265,12 @@ bool initialize(const std::string& kernelDir) {
         g_validStartJD = etToJulian(overallStart);
         g_validEndJD = etToJulian(overallEnd);
         
-        std::cout << "\n=== VALID TIME RANGE (all planets) ===\n";
+        std::cout << "\n=== VALID TIME RANGE ===\n";
         std::cout << "Start: " << etToDateString(overallStart) << " (JD " << g_validStartJD << ")\n";
         std::cout << "End:   " << etToDateString(overallEnd) << " (JD " << g_validEndJD << ")\n";
-        std::cout << "======================================\n\n";
+        std::cout << "========================\n\n";
     } else {
-        std::cerr << "SPICE: Warning - No common time range found for all bodies!\n";
+        std::cerr << "SPICE: Warning - No common time range found!\n";
     }
 
     return true;
@@ -277,6 +282,7 @@ void cleanup() {
         g_initialized = false;
         g_loadedSpkFiles.clear();
         g_bodyHasData.clear();
+        g_availableBodies.clear();
     }
 }
 
@@ -755,6 +761,10 @@ glm::dvec3 getBodyPosition(int naifId, double jdTdb) {
 
 std::string getLastError() {
     return g_lastError;
+}
+
+std::vector<BodyInfo> getAvailableBodies() {
+    return g_availableBodies;
 }
 
 } // namespace SpiceEphemeris

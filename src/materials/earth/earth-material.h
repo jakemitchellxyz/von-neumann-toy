@@ -1,11 +1,16 @@
 #pragma once
 
 #include "../../concerns/constants.h"
+#include "../../concerns/helpers/vulkan.h"
 #include "../../concerns/settings.h"
+// #include "voxel-octree.h"
 #include <GLFW/glfw3.h>
 #include <array>
 #include <glm/glm.hpp>
+// #include <memory>
 #include <string>
+#include <vector>
+#include <vulkan/vulkan.h>
 
 // ==================================
 // Earth Material with Monthly Textures
@@ -175,6 +180,14 @@ public:
     // Set screen dimensions for occlusion culling
     static void setScreenDimensions(int width, int height);
 
+    // Set view and projection matrices for Vulkan rendering (call before rendering each frame)
+    // projectionMatrix should be the OpenGL-style projection matrix (will be converted to Vulkan format)
+    static void setViewProjectionMatrices(const glm::mat4 &viewMatrix, const glm::mat4 &projectionMatrix);
+
+    // Get view and projection matrices (for use by other renderers)
+    static glm::mat4 getViewMatrix();
+    static glm::mat4 getProjectionMatrix();
+
     // Calculate dynamic tessellation based on camera distance
     // Returns (baseSlices, baseStacks, localSlices, localStacks) tuple and closest point on sphere to camera
     // baseSlices/baseStacks: tessellation for regions outside the local high-detail area
@@ -183,6 +196,10 @@ public:
                                                                 float sphereRadius,
                                                                 const glm::vec3 &cameraPos,
                                                                 glm::vec3 &closestPointOnSphere);
+
+    // Cleanup all textures and Vulkan resources
+    // Should be called explicitly before destroying Vulkan device to ensure proper cleanup order
+    void cleanup();
 
 private:
     // Generate sphere geometry with proper UV mapping
@@ -213,9 +230,6 @@ private:
 
     // Load wind texture (2-channel RG format) - specialized for wind force vectors
     GLuint loadWindTexture(const std::string &filepath);
-
-    // Cleanup all textures
-    void cleanup();
 
     // ==================================
     // Static preprocessing helpers
@@ -283,6 +297,40 @@ private:
     GLuint normalMapTexture_;
     bool elevationLoaded_;
 
+    // Octree-based surface mesh (replaces tessellated sphere)
+    // std::unique_ptr<EarthVoxelOctree::PlanetOctree> octreeMesh_;
+    // std::vector<EarthVoxelOctree::MeshVertex> meshVertices_;
+    std::vector<unsigned int> meshIndices_;
+    std::vector<glm::vec3> voxelWireframeEdges_; // Voxel wireframe edges for debug rendering
+    bool meshGenerated_;
+    std::string textureBasePath_; // Base path for texture files (stored during initialization)
+
+    // VAO/VBO for OpenGL 3.3 core profile rendering
+    GLuint meshVAO_;
+    GLuint meshVBO_;
+    GLuint meshEBO_;
+    bool meshVAOCreated_;
+
+    // Generate octree mesh from heightmap (called during initialization)
+    void generateOctreeMesh(float displayRadius, float maxRadius);
+
+    // Update octree mesh with proximity-based subdivision
+    // Regenerates mesh with higher detail near camera position
+    // cameraPosWorld: Camera position in world space
+    // planetPosition: Planet position in world space
+    // displayRadius: Planet radius in display units
+    // maxSubdivisionDistance: Maximum distance from camera to subdivide (in display units)
+    void updateOctreeMeshForProximity(const glm::vec3 &cameraPosWorld,
+                                      const glm::vec3 &planetPosition,
+                                      float displayRadius,
+                                      float maxSubdivisionDistance);
+
+    // Render octree mesh with shader (normal rendering with edges visible)
+    void drawOctreeMesh(const glm::vec3 &position);
+
+    // Debug: Render voxel wireframes
+    void drawVoxelWireframes(const glm::vec3 &position);
+
     // Specular/Roughness texture (surface reflectivity from MODIS green channel)
     GLuint specularTexture_;
     bool specularLoaded_;
@@ -324,6 +372,30 @@ private:
     // ==================================
 
     // Shader program for per-pixel normal mapping
+    // Vulkan pipeline (replaces OpenGL shader program)
+    VkPipeline graphicsPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> descriptorSets_;
+    VkShaderModule vertexShaderModule_ = VK_NULL_HANDLE;
+    VkShaderModule fragmentShaderModule_ = VK_NULL_HANDLE;
+
+    // Uniform buffers
+    VulkanBuffer vertexUniformBuffer_;   // For vertex shader uniforms (binding 2)
+    VulkanBuffer fragmentUniformBuffer_; // For fragment shader uniforms (binding 16)
+
+    // Vertex/index buffers (replaces VAO/VBO/EBO)
+    VulkanBuffer vertexBuffer_;
+    VulkanBuffer indexBuffer_;
+    bool buffersCreated_ = false;
+
+    // Chunked LOD processing state
+    int currentLodLevel_ = -1;                         // Current LOD level being processed (-1 = not processing)
+    float lastCameraDistance_ = -1.0f;                 // Last camera distance (for detecting movement)
+    static constexpr int MAX_LOD_LEVELS_PER_FRAME = 1; // Process 1 LOD level per frame
+
+    // Legacy OpenGL compatibility (will be removed)
     GLuint shaderProgram_;
     bool shaderAvailable_;
 
@@ -373,6 +445,8 @@ private:
     GLint uniformSphereRadius_;      // Sphere radius (for flat circle projection)
     GLint uniformBillboardCenter_;   // Billboard center position (closest point on sphere to camera)
     GLint uniformDisplacementScale_; // Multiplier to scale vertex displacement for visibility
+    GLint uniformShowWireframe_;     // 1 = show wireframe overlay, 0 = normal rendering
+    GLint uniformMVP_;               // Model-View-Projection matrix (GLSL 3.30 core profile)
 
     // Initialize surface shader (earth-vertex.glsl + earth-fragment.glsl)
     bool initializeSurfaceShader();
@@ -435,15 +509,6 @@ public:
     {
         return useSpecular_;
     }
-
-    // Draw wireframe version of Earth (for wireframe overlay mode)
-    // Renders the same geometry as draw() but without shaders, so glPolygonMode works
-    void drawWireframe(const glm::vec3 &position,
-                       float displayRadius,
-                       const glm::vec3 &poleDirection,
-                       const glm::vec3 &primeMeridianDirection,
-                       double julianDate,
-                       const glm::vec3 &cameraPos);
 
 private:
     // Draw a wireframe ring

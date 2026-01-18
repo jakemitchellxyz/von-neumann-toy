@@ -11,7 +11,8 @@
 // All positions are relative to the Solar System Barycenter (SSB)
 // Time is in Barycentric Dynamical Time (TDB)
 
-namespace SpiceEphemeris {
+namespace SpiceEphemeris
+{
 
 // ==================================
 // NAIF Body IDs
@@ -19,27 +20,27 @@ namespace SpiceEphemeris {
 // Standard NAIF integer codes for solar system bodies
 // Using barycenters (1-9) for outer planets as de440.bsp has full coverage
 // Planet centers (X99) require additional satellite kernels with limited dates
-constexpr int NAIF_SSB     = 0;       // Solar System Barycenter
-constexpr int NAIF_SUN     = 10;      // Sun
-constexpr int NAIF_MERCURY = 1;       // Mercury Barycenter (≈ planet center)
-constexpr int NAIF_VENUS   = 2;       // Venus Barycenter (≈ planet center)
-constexpr int NAIF_EARTH   = 399;     // Earth (planet center, needed for Moon offset)
-constexpr int NAIF_MOON    = 301;     // Moon
-constexpr int NAIF_MARS    = 4;       // Mars Barycenter
-constexpr int NAIF_JUPITER = 5;       // Jupiter Barycenter
-constexpr int NAIF_SATURN  = 6;       // Saturn Barycenter
-constexpr int NAIF_URANUS  = 7;       // Uranus Barycenter
-constexpr int NAIF_NEPTUNE = 8;       // Neptune Barycenter
-constexpr int NAIF_PLUTO   = 9;       // Pluto Barycenter
+constexpr int NAIF_SSB = 0;     // Solar System Barycenter
+constexpr int NAIF_SUN = 10;    // Sun
+constexpr int NAIF_MERCURY = 1; // Mercury Barycenter (≈ planet center)
+constexpr int NAIF_VENUS = 2;   // Venus Barycenter (≈ planet center)
+constexpr int NAIF_EARTH = 399; // Earth (planet center, needed for Moon offset)
+constexpr int NAIF_MOON = 301;  // Moon
+constexpr int NAIF_MARS = 4;    // Mars Barycenter
+constexpr int NAIF_JUPITER = 5; // Jupiter Barycenter
+constexpr int NAIF_SATURN = 6;  // Saturn Barycenter
+constexpr int NAIF_URANUS = 7;  // Uranus Barycenter
+constexpr int NAIF_NEPTUNE = 8; // Neptune Barycenter
+constexpr int NAIF_PLUTO = 9;   // Pluto Barycenter
 
 // Major moons
-constexpr int NAIF_IO       = 501;    // Io
-constexpr int NAIF_EUROPA   = 502;    // Europa
-constexpr int NAIF_GANYMEDE = 503;    // Ganymede
-constexpr int NAIF_CALLISTO = 504;    // Callisto
-constexpr int NAIF_TITAN    = 606;    // Titan
-constexpr int NAIF_TRITON   = 801;    // Triton
-constexpr int NAIF_CHARON   = 901;    // Charon
+constexpr int NAIF_IO = 501;       // Io
+constexpr int NAIF_EUROPA = 502;   // Europa
+constexpr int NAIF_GANYMEDE = 503; // Ganymede
+constexpr int NAIF_CALLISTO = 504; // Callisto
+constexpr int NAIF_TITAN = 606;    // Titan
+constexpr int NAIF_TRITON = 801;   // Triton
+constexpr int NAIF_CHARON = 901;   // Charon
 
 // ==================================
 // Initialization
@@ -48,7 +49,7 @@ constexpr int NAIF_CHARON   = 901;    // Charon
 // Initialize the SPICE system and load kernels from the specified directory
 // kernelDir: path to directory containing SPICE kernel files
 // Returns true if at least one SPK kernel was loaded successfully
-bool initialize(const std::string& kernelDir);
+bool initialize(const std::string &kernelDir);
 
 // Check if SPICE is initialized
 bool isInitialized();
@@ -63,7 +64,7 @@ void cleanup();
 // Get the time coverage of loaded SPK kernels for a specific body
 // Returns start and end times as TDB Julian Dates
 // Returns false if no coverage found for the body
-bool getTimeCoverage(int naifId, double& startJD, double& endJD);
+bool getTimeCoverage(int naifId, double &startJD, double &endJD);
 
 // Get the latest time available across all major planets
 // Returns the minimum of all end times (so all bodies have valid data)
@@ -96,7 +97,7 @@ glm::dvec3 getBodyPosition(int naifId, double jdTdb);
 // position: output position in AU
 // velocity: output velocity in AU/day
 // Returns false if body not found or time out of range
-bool getBodyState(int naifId, double jdTdb, glm::dvec3& position, glm::dvec3& velocity);
+bool getBodyState(int naifId, double jdTdb, glm::dvec3 &position, glm::dvec3 &velocity);
 
 // ==================================
 // Rotation/Orientation Functions
@@ -122,7 +123,7 @@ glm::dvec3 getBodyPrimeMeridian(int naifId, double jdTdb);
 // pole: output - north pole direction (Z-axis of body-fixed frame)
 // primeMeridian: output - prime meridian direction (X-axis)
 // Returns true if successful
-bool getBodyFrame(int naifId, double jdTdb, glm::dvec3& pole, glm::dvec3& primeMeridian);
+bool getBodyFrame(int naifId, double jdTdb, glm::dvec3 &pole, glm::dvec3 &primeMeridian);
 
 // Check if rotation data is available for a body
 bool hasRotationData(int naifId);
@@ -149,6 +150,22 @@ double getBodyGM(int naifId);
 // Get body mass in kg (derived from GM / G)
 // Returns 0 if not available
 double getBodyMass(int naifId);
+
+// ==================================
+// Body Discovery
+// ==================================
+
+// Information about a discovered celestial body
+struct BodyInfo
+{
+    int naifId;
+    std::string name;
+    double radiusKm; // Mean radius in km (0 if unknown)
+};
+
+// Get list of all bodies with ephemeris data in loaded kernels
+// Returns bodies discovered during initialization
+std::vector<BodyInfo> getAvailableBodies();
 
 // ==================================
 // Utility

@@ -1,11 +1,11 @@
-#version 120
+#version 330 core
 #extension GL_ARB_shader_texture_lod : enable
 
 // Atmosphere fragment shader
 // Renders atmosphere using SDF-based cone marching with transmittance and scattering LUTs
 
-varying vec2 vTexCoord;
-varying vec3 vRayDir; // Ray direction in world space (normalized)
+out vec2 vTexCoord;
+out vec3 vRayDir; // Ray direction in world space (normalized)
 
 uniform vec3 uCameraPos;         // Camera position in world space
 uniform vec3 uPlanetCenter;      // Planet center position
@@ -75,7 +75,7 @@ vec3 sampleTransmittanceLUT(float muSun, float height)
     float v = 1.0 - height; // Invert so 0 = top, 1 = surface
 
     vec2 lutUV = vec2(u, v) + vec2(0.5 / LUT_TRANSMITTANCE_WIDTH, 0.5 / LUT_TRANSMITTANCE_HEIGHT);
-    vec3 transmittance = texture2D(uTransmittanceLUT, lutUV).rgb;
+    vec3 transmittance = texture(uTransmittanceLUT, lutUV).rgb;
 
     return clamp(transmittance, vec3(0.0), vec3(10.0));
 }
@@ -99,7 +99,7 @@ vec3 sampleScatteringLUT(float muSun, float height, float nu)
     // Sample scattering LUT
     // RGB channels encode scattering at different angles (typically forward, side, backward)
     // R = forward scattering (nu ≈ 1), G = side scattering (nu ≈ 0), B = backward scattering (nu ≈ -1)
-    vec3 scattering = texture2D(uScatteringLUT, lutUV).rgb;
+    vec3 scattering = texture(uScatteringLUT, lutUV).rgb;
 
     // Interpolate between scattering angles based on nu
     // nu = 1.0 (forward) -> use R channel

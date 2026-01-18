@@ -1,45 +1,43 @@
-#version 120
+#version 330 core
 
 // Atmosphere vertex shader
 // Renders a fullscreen quad just inside the near plane
 
-varying vec2 vTexCoord;
-varying vec3 vRayDir; // Ray direction in world space
+layout(location = 0) in vec2 aPosition;
+layout(location = 1) in vec2 aTexCoord;
 
-uniform vec3 uCameraPos;        // Camera position in world space
-uniform vec3 uCameraDir;        // Camera forward direction (normalized)
-uniform vec3 uCameraRight;      // Camera right direction (normalized)
-uniform vec3 uCameraUp;         // Camera up direction (normalized)
-uniform float uCameraFOV;       // Camera field of view (radians)
-uniform float uAspectRatio;     // Screen aspect ratio (width/height)
-uniform float uNearPlane;       // Near plane distance
+out vec2 vTexCoord;
+out vec3 vRayDir; // Ray direction in world space
+
+uniform vec3 uCameraPos;    // Camera position in world space
+uniform vec3 uCameraDir;    // Camera forward direction (normalized)
+uniform vec3 uCameraRight;  // Camera right direction (normalized)
+uniform vec3 uCameraUp;     // Camera up direction (normalized)
+uniform float uCameraFOV;   // Camera field of view (radians)
+uniform float uAspectRatio; // Screen aspect ratio (width/height)
+uniform float uNearPlane;   // Near plane distance
 
 void main()
 {
     // Get vertex position in NDC space [-1, 1]
-    vec2 ndcPos = gl_Vertex.xy;
-    vTexCoord = gl_MultiTexCoord0.st;
-    
+    vec2 ndcPos = aPosition;
+    vTexCoord = aTexCoord;
+
     // Calculate ray direction for this pixel in world space
     // Convert NDC to camera space ray direction
     float tanHalfFOV = tan(uCameraFOV * 0.5);
-    vec3 cameraSpaceRay = vec3(
-        ndcPos.x * tanHalfFOV * uAspectRatio,
-        ndcPos.y * tanHalfFOV,
-        -1.0 // Forward in camera space (negative Z)
+    vec3 cameraSpaceRay = vec3(ndcPos.x * tanHalfFOV * uAspectRatio,
+                               ndcPos.y * tanHalfFOV,
+                               -1.0 // Forward in camera space (negative Z)
     );
-    
+
     // Normalize camera space ray
     float rayLen = length(cameraSpaceRay);
     cameraSpaceRay = cameraSpaceRay / rayLen;
-    
+
     // Transform to world space using camera basis vectors
-    vRayDir = normalize(
-        uCameraRight * cameraSpaceRay.x +
-        uCameraUp * cameraSpaceRay.y +
-        uCameraDir * cameraSpaceRay.z
-    );
-    
+    vRayDir = normalize(uCameraRight * cameraSpaceRay.x + uCameraUp * cameraSpaceRay.y + uCameraDir * cameraSpaceRay.z);
+
     // Output position: fullscreen quad in NDC space
     // Position just inside the near plane (z = -0.999 in NDC) to ensure it's visible
     // With depth test disabled, this should render on top of everything

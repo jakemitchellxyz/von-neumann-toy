@@ -12,6 +12,15 @@
 // r, g, b: color
 void DrawArrow(float x, float y, float size, bool expanded, float r, float g, float b);
 
+// Draw a left arrow (<) for UI hide button
+void DrawLeftArrow(float x, float y, float size, float r, float g, float b);
+
+// Draw an up arrow (^) for open dropdowns
+void DrawUpArrow(float x, float y, float size, float r, float g, float b);
+
+// Draw a down arrow (V) for closed dropdowns
+void DrawDownArrow(float x, float y, float size, float r, float g, float b);
+
 // Draw folder icon
 void DrawFolderIcon(float x, float y, float size, float r, float g, float b);
 

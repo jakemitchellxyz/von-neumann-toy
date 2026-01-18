@@ -1,6 +1,7 @@
 #include "camera-controller.h"
 #include "../materials/earth/economy/earth-economy.h"
 #include "../types/celestial-body.h"
+#include "app-state.h"
 #include "constants.h"
 #include "solar-lighting.h"
 #include <algorithm>
@@ -13,8 +14,8 @@
 // Constructor
 // ==================================
 CameraController::CameraController()
-    : position(0.0f), yaw(0.0f), pitch(0.0f), roll(0.0f), moveSpeed(150.0f), rotateSpeed(0.15f), rollSpeed(1.0f),
-      panSpeed(15.0f), scrollSpeed(500.0f), orbitSpeed(0.005f), fov(60.0f),
+    : moveSpeed(150.0f), rotateSpeed(0.15f), rollSpeed(1.0f),
+      panSpeed(15.0f), scrollSpeed(500.0f), orbitSpeed(0.005f),
       maxRayDistance(static_cast<float>(PLUTO_SMA_AU * UNITS_PER_AU)), hoveredBody(nullptr), selectedBody(nullptr),
       contextMenuOpen(false), contextMenuBody(nullptr), contextMenuX(0.0), contextMenuY(0.0), isFocused(false),
       focusIsLagrangePoint(false), focusOffset(0.0f), followMode(CameraFollowMode::Fixed), lastJulianDate(0.0),
@@ -29,6 +30,8 @@ CameraController::CameraController()
       surfaceNormal(0.0f, 1.0f, 0.0f), surfaceNorth(0.0f, 0.0f, -1.0f), surfaceEast(1.0f, 0.0f, 0.0f),
       surfaceLocalYaw(0.0f), surfaceLocalPitch(90.0f) // Start looking straight up (along surface normal)
 {
+    // Camera state (position, yaw, pitch, roll, fov) is stored in APP_STATE.worldState.camera
+    // and initialized in AppState constructor
 }
 
 // ==================================
@@ -60,76 +63,40 @@ void CameraController::initializeForEarth(const glm::vec3 &earthPos, float earth
     glm::vec3 cameraDir = glm::normalize(glm::vec3(1.0f, 0.3f, 0.5f));
 
     // Position camera at the focus distance from Earth
-    position = earthPos + cameraDir * viewDistance;
+    camera().position = earthPos + cameraDir * viewDistance;
 
     // Point camera directly at Earth
-    glm::vec3 toEarth = glm::normalize(earthPos - position);
-    yaw = glm::degrees(atan2(toEarth.z, toEarth.x));
-    pitch = glm::degrees(asin(toEarth.y));
+    glm::vec3 toEarth = glm::normalize(earthPos - camera().position);
+    camera().yaw = glm::degrees(atan2(toEarth.z, toEarth.x));
+    camera().pitch = glm::degrees(asin(toEarth.y));
 
     initialized = true;
 
-    std::cout << "Camera positioned at: (" << position.x << ", " << position.y << ", " << position.z << ")\n";
+    std::cout << "Camera positioned at: (" << camera().position.x << ", " << camera().position.y << ", " << camera().position.z << ")\n";
 }
 
 // ==================================
 // Camera Direction Vectors
 // ==================================
+// These delegate to the CameraState methods which handle roll properly
 glm::vec3 CameraController::getFront() const
 {
-    glm::vec3 front;
-    front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-    front.y = sin(glm::radians(pitch));
-    front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
-    return glm::normalize(front);
+    return camera().getFront();
 }
 
 glm::vec3 CameraController::getUp() const
 {
-    glm::vec3 front = getFront();
-    glm::vec3 right = getRight();
-    glm::vec3 up = glm::normalize(glm::cross(right, front));
-
-    // Apply roll rotation around the forward axis
-    if (std::abs(roll) > 0.001f)
-    {
-        float rollRad = glm::radians(roll);
-        float cosR = cos(rollRad);
-        float sinR = sin(rollRad);
-        // Rodrigues' rotation formula around front axis
-        up = up * cosR + glm::cross(front, up) * sinR + front * glm::dot(front, up) * (1.0f - cosR);
-        up = glm::normalize(up);
-    }
-
-    return up;
+    return camera().getUp();
 }
 
 glm::vec3 CameraController::getRight() const
 {
-    glm::vec3 front = getFront();
-    glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
-    glm::vec3 right = glm::normalize(glm::cross(front, worldUp));
-
-    // Apply roll rotation around the forward axis
-    if (std::abs(roll) > 0.001f)
-    {
-        float rollRad = glm::radians(roll);
-        float cosR = cos(rollRad);
-        float sinR = sin(rollRad);
-        // Rodrigues' rotation formula around front axis
-        right = right * cosR + glm::cross(front, right) * sinR + front * glm::dot(front, right) * (1.0f - cosR);
-        right = glm::normalize(right);
-    }
-
-    return right;
+    return camera().getRight();
 }
 
 glm::mat4 CameraController::getViewMatrix() const
 {
-    glm::vec3 front = getFront();
-    glm::vec3 target = position + front;
-    glm::vec3 up = getUp(); // Use rolled up vector
-    return glm::lookAt(position, target, up);
+    return camera().getViewMatrix();
 }
 
 // ==================================
@@ -177,10 +144,10 @@ void CameraController::focusOnBody(const CelestialBody *body)
     else
     {
         // For the Sun or emissive bodies, use current camera direction or default
-        cameraDir = glm::normalize(position - body->position);
+        cameraDir = glm::normalize(camera().position - body->position);
 
         // If camera is too close or direction is degenerate, use a default direction
-        if (glm::length(position - body->position) < 0.01f || glm::any(glm::isnan(cameraDir)))
+        if (glm::length(camera().position - body->position) < 0.01f || glm::any(glm::isnan(cameraDir)))
         {
             cameraDir = glm::vec3(1.0f, 0.3f, 0.0f); // Default viewing angle
             cameraDir = glm::normalize(cameraDir);
@@ -189,18 +156,18 @@ void CameraController::focusOnBody(const CelestialBody *body)
 
     // Position camera at the radius-based distance from the body
     // This ensures consistent viewing distance regardless of sun position
-    position = body->position + cameraDir * viewDistance;
+    camera().position = body->position + cameraDir * viewDistance;
 
     // Point camera at the body
-    glm::vec3 toBody = glm::normalize(body->position - position);
-    yaw = glm::degrees(atan2(toBody.z, toBody.x));
-    pitch = glm::degrees(asin(toBody.y));
+    glm::vec3 toBody = glm::normalize(body->position - camera().position);
+    camera().yaw = glm::degrees(atan2(toBody.z, toBody.x));
+    camera().pitch = glm::degrees(asin(toBody.y));
 
     // Enable focus tracking - camera will follow this body
     isFocused = true;
     focusIsLagrangePoint = false;
     // Store fixed offset from body to camera (camera always at body + offset)
-    focusOffset = position - body->position;
+    focusOffset = camera().position - body->position;
 }
 
 // ==================================
@@ -212,22 +179,22 @@ void CameraController::focusOnLagrangePoint(const glm::vec3 &pos, float displayR
     float viewDistance = std::max(displayRadius * 15.0f, 10.0f);
 
     // Use current camera direction to determine where to place camera
-    glm::vec3 cameraDir = glm::normalize(position - pos);
+    glm::vec3 cameraDir = glm::normalize(camera().position - pos);
 
     // If camera is too close or direction is degenerate, use a default direction
-    if (glm::length(position - pos) < 0.01f || glm::any(glm::isnan(cameraDir)))
+    if (glm::length(camera().position - pos) < 0.01f || glm::any(glm::isnan(cameraDir)))
     {
         cameraDir = glm::vec3(1.0f, 0.3f, 0.0f);
         cameraDir = glm::normalize(cameraDir);
     }
 
     // Position camera at the calculated distance
-    position = pos + cameraDir * viewDistance;
+    camera().position = pos + cameraDir * viewDistance;
 
     // Point camera at the Lagrange point
-    glm::vec3 toPoint = glm::normalize(pos - position);
-    yaw = glm::degrees(atan2(toPoint.z, toPoint.x));
-    pitch = glm::degrees(asin(toPoint.y));
+    glm::vec3 toPoint = glm::normalize(pos - camera().position);
+    camera().yaw = glm::degrees(atan2(toPoint.z, toPoint.x));
+    camera().pitch = glm::degrees(asin(toPoint.y));
 
     // Enable focus tracking for Lagrange point
     isFocused = true;
@@ -236,7 +203,7 @@ void CameraController::focusOnLagrangePoint(const glm::vec3 &pos, float displayR
     focusedLagrangeRadius = displayRadius;
     focusedLagrangeName = name;
     // Store fixed offset from Lagrange point to camera
-    focusOffset = position - pos;
+    focusOffset = camera().position - pos;
 }
 
 // ==================================
@@ -293,7 +260,7 @@ void CameraController::updateFollowTarget(double currentJD)
     if (focusIsLagrangePoint)
     {
         // Following a Lagrange point - camera = point + offset
-        position = focusedLagrangePosition + focusOffset;
+        camera().position = focusedLagrangePosition + focusOffset;
     }
     else if (selectedBody != nullptr)
     {
@@ -336,10 +303,10 @@ void CameraController::updateFollowTarget(double currentJD)
 
             // Camera position: on surface + absolute altitude offset
             float distanceFromCenter = selectedBody->displayRadius + surfaceAltitude;
-            position = selectedBody->position + surfaceNormal * distanceFromCenter;
+            camera().position = selectedBody->position + surfaceNormal * distanceFromCenter;
 
             // Store offset for consistency with other modes
-            focusOffset = position - selectedBody->position;
+            focusOffset = camera().position - selectedBody->position;
 
             // Update world orientation from local surface coordinates
             // This keeps the camera looking in the same local direction as the planet rotates
@@ -369,17 +336,17 @@ void CameraController::updateFollowTarget(double currentJD)
                 glm::vec3 rotatedFront =
                     front * cosA + glm::cross(axis, front) * sinA + axis * glm::dot(axis, front) * (1.0f - cosA);
                 rotatedFront = glm::normalize(rotatedFront);
-                yaw = glm::degrees(atan2(rotatedFront.z, rotatedFront.x));
-                pitch = glm::degrees(asin(glm::clamp(rotatedFront.y, -1.0f, 1.0f)));
+                camera().yaw = glm::degrees(atan2(rotatedFront.z, rotatedFront.x));
+                camera().pitch = glm::degrees(asin(glm::clamp(rotatedFront.y, -1.0f, 1.0f)));
             }
 
             // Set camera position from offset
-            position = selectedBody->position + focusOffset;
+            camera().position = selectedBody->position + focusOffset;
         }
         else
         {
             // Fixed mode: just follow without rotation
-            position = selectedBody->position + focusOffset;
+            camera().position = selectedBody->position + focusOffset;
         }
     }
 
@@ -421,13 +388,13 @@ void CameraController::enterSurfaceView(CelestialBody *body, float latitude, flo
     // ============================================================
     // Cast ray from camera to planet center to find surface point
     // ============================================================
-    glm::vec3 cameraToCenter = body->position - position;
+    glm::vec3 cameraToCenter = body->position - camera().position;
     glm::vec3 rayDir = glm::normalize(cameraToCenter);
 
     // Ray-sphere intersection: find where ray hits planet surface
     // Ray: P(t) = position + t * rayDir
     // Sphere: |P - body->position|^2 = displayRadius^2
-    glm::vec3 oc = position - body->position;
+    glm::vec3 oc = camera().position - body->position;
     float a = glm::dot(rayDir, rayDir); // Should be 1.0 (normalized)
     float b = 2.0f * glm::dot(oc, rayDir);
     float c = glm::dot(oc, oc) - body->displayRadius * body->displayRadius;
@@ -438,7 +405,7 @@ void CameraController::enterSurfaceView(CelestialBody *body, float latitude, flo
     {
         // Ray intersects sphere - use the closer intersection point
         float t = (-b - sqrt(discriminant)) / (2.0f * a);
-        surfacePoint = position + t * rayDir;
+        surfacePoint = camera().position + t * rayDir;
 
         // Surface normal points outward from center
         surfaceNormal = glm::normalize(surfacePoint - body->position);
@@ -469,7 +436,7 @@ void CameraController::enterSurfaceView(CelestialBody *body, float latitude, flo
         else
         {
             // Use direction from center to camera as fallback
-            surfaceNormal = glm::normalize(position - body->position);
+            surfaceNormal = glm::normalize(camera().position - body->position);
             surfacePoint = body->position + surfaceNormal * body->displayRadius;
         }
     }
@@ -500,8 +467,8 @@ void CameraController::enterSurfaceView(CelestialBody *body, float latitude, flo
     // Position camera 2 meters above surface point
     // ============================================================
     float distanceFromCenter = body->displayRadius + surfaceAltitude; // surfaceAltitude is ~2 meters
-    position = body->position + surfaceNormal * distanceFromCenter;
-    focusOffset = position - body->position;
+    camera().position = body->position + surfaceNormal * distanceFromCenter;
+    focusOffset = camera().position - body->position;
 
     // ============================================================
     // Calculate lat/lon for the surface point (for display)
@@ -537,12 +504,12 @@ void CameraController::enterSurfaceView(CelestialBody *body, float latitude, flo
     surfaceLocalYaw = 90.0f; // 90 degrees = eastward
     // Set pitch to minimum allowed (FOV/2) so horizon is visible at bottom of screen
     // This prevents frustum from clipping through planet while still showing horizon
-    surfaceLocalPitch = fov / 2.0f;
+    surfaceLocalPitch = camera().fov / 2.0f;
 
     // Clamp to valid range and convert to world coordinates
     clampSurfaceOrientation();
     updateWorldOrientationFromSurface();
-    roll = 0.0f;
+    camera().roll = 0.0f;
 
     std::cout << "Entered surface view at lat=" << glm::degrees(surfaceLatitude)
               << "°, lon=" << glm::degrees(surfaceLongitude) << "°"
@@ -568,8 +535,8 @@ void CameraController::exitSurfaceView()
 
         // Point camera at the body
         glm::vec3 toBody = glm::normalize(-focusOffset);
-        yaw = glm::degrees(atan2(toBody.z, toBody.x));
-        pitch = glm::degrees(asin(toBody.y));
+        camera().yaw = glm::degrees(atan2(toBody.z, toBody.x));
+        camera().pitch = glm::degrees(asin(toBody.y));
     }
 
     std::cout << "Exited surface view" << std::endl;
@@ -602,8 +569,8 @@ void CameraController::updateWorldOrientationFromSurface()
     lookDir = glm::normalize(lookDir);
 
     // Convert look direction to world yaw/pitch
-    yaw = glm::degrees(atan2(lookDir.z, lookDir.x));
-    pitch = glm::degrees(asin(glm::clamp(lookDir.y, -1.0f, 1.0f)));
+    camera().yaw = glm::degrees(atan2(lookDir.z, lookDir.x));
+    camera().pitch = glm::degrees(asin(glm::clamp(lookDir.y, -1.0f, 1.0f)));
 }
 
 // ==================================
@@ -616,7 +583,7 @@ void CameraController::clampSurfaceOrientation()
     // Minimum pitch: just above horizon, accounting for FOV
     // The bottom of the frustum is at (pitch - FOV/2)
     // To keep bottom above horizon (0°): pitch - FOV/2 >= 0, so pitch >= FOV/2
-    float minPitch = fov / 2.0f;
+    float minPitch = camera().fov / 2.0f;
 
     // Maximum pitch: straight up (90°)
     float maxPitch = 90.0f;
@@ -663,7 +630,7 @@ float CameraController::getProximitySpeedMultiplier(float *outMinDistance) const
     }
 
     float bodyRadius = selectedBody->displayRadius;
-    float distanceToCenter = glm::length(position - selectedBody->position);
+    float distanceToCenter = glm::length(camera().position - selectedBody->position);
     float altitude = distanceToCenter - bodyRadius;
 
     // Minimum distance from center: 0.5km above the surface
@@ -709,7 +676,7 @@ float CameraController::getDynamicNearPlane() const
     }
 
     float bodyRadius = selectedBody->displayRadius;
-    float distanceToCenter = glm::length(position - selectedBody->position);
+    float distanceToCenter = glm::length(camera().position - selectedBody->position);
     float altitude = distanceToCenter - bodyRadius;
 
     // If far from surface (altitude > default near plane), use default
@@ -738,7 +705,7 @@ bool CameraController::clampToSurface()
     // Minimum distance: 0.5km above the surface (MIN_ALTITUDE)
     float minDistance = bodyRadius + MIN_ALTITUDE;
 
-    glm::vec3 toCamera = position - selectedBody->position;
+    glm::vec3 toCamera = camera().position - selectedBody->position;
     float distanceToCenter = glm::length(toCamera);
 
     if (distanceToCenter < minDistance)
@@ -747,15 +714,15 @@ bool CameraController::clampToSurface()
         if (distanceToCenter > 0.001f)
         {
             glm::vec3 direction = toCamera / distanceToCenter;
-            position = selectedBody->position + direction * minDistance;
+            camera().position = selectedBody->position + direction * minDistance;
         }
         else
         {
             // Camera is at body center (degenerate case) - push out along arbitrary direction
-            position = selectedBody->position + glm::vec3(0.0f, 1.0f, 0.0f) * minDistance;
+            camera().position = selectedBody->position + glm::vec3(0.0f, 1.0f, 0.0f) * minDistance;
         }
         // Update focusOffset to match the clamped position
-        focusOffset = position - selectedBody->position;
+        focusOffset = camera().position - selectedBody->position;
         return true;
     }
     return false;
@@ -848,16 +815,16 @@ void CameraController::processKeyboard(GLFWwindow *window)
         // Q/E: Roll camera around forward axis (works in surface mode too)
         if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
         {
-            roll -= rollSpeed;
+            camera().roll -= rollSpeed;
         }
         if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
         {
-            roll += rollSpeed;
+            camera().roll += rollSpeed;
         }
-        while (roll > 180.0f)
-            roll -= 360.0f;
-        while (roll < -180.0f)
-            roll += 360.0f;
+        while (camera().roll > 180.0f)
+            camera().roll -= 360.0f;
+        while (camera().roll < -180.0f)
+            camera().roll += 360.0f;
 
         // Space/Ctrl: Disabled in surface mode - explicitly ignored
         // (You can't fly up from the surface)
@@ -883,54 +850,54 @@ void CameraController::processKeyboard(GLFWwindow *window)
     // W/S: Move along camera's forward/backward axis
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
     {
-        position += front * speed;
+        camera().position += front * speed;
         moved = true;
     }
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
     {
-        position -= front * speed;
+        camera().position -= front * speed;
         moved = true;
     }
 
     // A/D: Move along camera's left/right axis
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
     {
-        position -= right * speed;
+        camera().position -= right * speed;
         moved = true;
     }
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
     {
-        position += right * speed;
+        camera().position += right * speed;
         moved = true;
     }
 
     // Space/Ctrl: Move along camera's up/down axis
     if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
     {
-        position += up * speed;
+        camera().position += up * speed;
         moved = true;
     }
     if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
         glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS)
     {
-        position -= up * speed;
+        camera().position -= up * speed;
         moved = true;
     }
 
     // Q/E: Roll camera around forward axis
     if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
     {
-        roll -= rollSpeed; // Counter-clockwise roll (negative)
+        camera().roll -= rollSpeed; // Counter-clockwise roll (negative)
     }
     if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
     {
-        roll += rollSpeed; // Clockwise roll (positive)
+        camera().roll += rollSpeed; // Clockwise roll (positive)
     }
     // Keep roll in reasonable range (-180 to 180)
-    while (roll > 180.0f)
-        roll -= 360.0f;
-    while (roll < -180.0f)
-        roll += 360.0f;
+    while (camera().roll > 180.0f)
+        camera().roll -= 360.0f;
+    while (camera().roll < -180.0f)
+        camera().roll += 360.0f;
 
     // Ensure camera doesn't clip through body surface
     if (moved)
@@ -961,7 +928,7 @@ glm::vec3 CameraController::getMouseRayDirection() const
 
     // Calculate the ray direction based on FOV
     float aspect = screenWidth / screenHeight;
-    float tanHalfFov = tan(glm::radians(fov / 2.0f));
+    float tanHalfFov = tan(glm::radians(camera().fov / 2.0f));
 
     // Get camera basis vectors
     glm::vec3 front = getFront();
@@ -1027,7 +994,7 @@ void CameraController::updateRaycast(const std::vector<CelestialBody *> &bodies,
 
     for (CelestialBody *body : bodies)
     {
-        float distance = raySphereIntersection(position, rayDir, body->position, body->displayRadius);
+        float distance = raySphereIntersection(camera().position, rayDir, body->position, body->displayRadius);
         // Only count hits within max ray distance (Pluto's orbit)
         if (distance > 0.0f && distance <= maxRayDistance)
         {
@@ -1040,7 +1007,7 @@ void CameraController::updateRaycast(const std::vector<CelestialBody *> &bodies,
                 if (body->name == "Earth")
                 {
                     // Compute surface intersection point
-                    glm::vec3 intersectionPoint = position + rayDir * distance;
+                    glm::vec3 intersectionPoint = camera().position + rayDir * distance;
                     glm::vec3 surfacePoint =
                         body->position + glm::normalize(intersectionPoint - body->position) * body->displayRadius;
 
@@ -1269,7 +1236,7 @@ void CameraController::handleCursorPos(GLFWwindow *window, double xpos, double y
         else if (altKeyPressed && selectedBody != nullptr)
         {
             // Orbit mode: rotate camera around selected body
-            glm::vec3 toCamera = position - selectedBody->position;
+            glm::vec3 toCamera = camera().position - selectedBody->position;
             float distance = glm::length(toCamera);
 
             // Calculate spherical coordinates relative to the body
@@ -1285,27 +1252,27 @@ void CameraController::handleCursorPos(GLFWwindow *window, double xpos, double y
 
             // Convert back to Cartesian coordinates
             float cosPhi = cos(phi);
-            position = selectedBody->position +
+            camera().position = selectedBody->position +
                        glm::vec3(distance * cosPhi * cos(theta), distance * sin(phi), distance * cosPhi * sin(theta));
 
             // Point camera at the body
-            glm::vec3 toBody = glm::normalize(selectedBody->position - position);
-            yaw = glm::degrees(atan2(toBody.z, toBody.x));
-            pitch = glm::degrees(asin(toBody.y));
+            glm::vec3 toBody = glm::normalize(selectedBody->position - camera().position);
+            camera().yaw = glm::degrees(atan2(toBody.z, toBody.x));
+            camera().pitch = glm::degrees(asin(toBody.y));
 
             // Maintain focus tracking during orbit (update offset for new position)
             isFocused = true;
-            focusOffset = position - selectedBody->position;
+            focusOffset = camera().position - selectedBody->position;
         }
         else
         {
             // Normal rotation mode
-            yaw += static_cast<float>(deltaX) * rotateSpeed;
-            pitch -= static_cast<float>(deltaY) * rotateSpeed;
-            if (pitch > 89.0f)
-                pitch = 89.0f;
-            if (pitch < -89.0f)
-                pitch = -89.0f;
+            camera().yaw += static_cast<float>(deltaX) * rotateSpeed;
+            camera().pitch -= static_cast<float>(deltaY) * rotateSpeed;
+            if (camera().pitch > 89.0f)
+                camera().pitch = 89.0f;
+            if (camera().pitch < -89.0f)
+                camera().pitch = -89.0f;
         }
     }
 
@@ -1318,8 +1285,8 @@ void CameraController::handleCursorPos(GLFWwindow *window, double xpos, double y
         // Pan speed relative to selected body's radius
         float currentPanSpeed = getRelativePanSpeed();
 
-        position -= right * static_cast<float>(deltaX) * currentPanSpeed;
-        position += up * static_cast<float>(deltaY) * currentPanSpeed;
+        camera().position -= right * static_cast<float>(deltaX) * currentPanSpeed;
+        camera().position += up * static_cast<float>(deltaY) * currentPanSpeed;
 
         // Ensure camera doesn't clip through body surface
         clampToSurface();
@@ -1349,7 +1316,7 @@ void CameraController::handleScroll(GLFWwindow *window, double xoffset, double y
     float speed = getRelativeScrollSpeed();
 
     glm::vec3 movement = front * static_cast<float>(yoffset) * speed;
-    position += movement;
+    camera().position += movement;
 
     // If focused, update the offset so we maintain the new distance
     if (isFocused && !focusIsLagrangePoint && selectedBody != nullptr)

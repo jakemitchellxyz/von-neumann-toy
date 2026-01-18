@@ -1,10 +1,8 @@
 #include "lagrange-point.h"
 #include "../concerns/constants.h"
+#include "../concerns/helpers/sphere-renderer.h"
 #include <cmath>
 #include <GLFW/glfw3.h>
-
-// Forward declaration for DrawSphere (defined in entrypoint.cpp)
-void DrawSphere(const glm::vec3& center, float radius, const glm::vec3& color, int slices, int stacks);
 
 // ==================================
 // Lagrange Point Drawing

@@ -1,12 +1,4 @@
-// ============================================================
-// Cone Marching Functions for Efficient Sphere Ray Marching
-// ============================================================
-// Cone marching is more efficient than SDF ray marching for spheres
-// because it allows larger step sizes when the cone doesn't intersect
-// the sphere. The cone expands linearly along the ray.
-//
-// Reference: Crassin et al. (2011) "Interactive Indirect Illumination 
-// Using Voxel Cone Tracing"
+#version 330 core
 
 // ============================================================
 // Ray-Sphere Intersection
@@ -23,7 +15,7 @@ bool raySphereIntersect(vec3 ro, vec3 rd, vec3 center, float radius, out float t
     float b = dot(oc, rd);
     float c = dot(oc, oc) - radius * radius;
     float disc = b * b - c;
-    
+
     if (disc < 0.0)
     {
         // No intersection
@@ -31,10 +23,10 @@ bool raySphereIntersect(vec3 ro, vec3 rd, vec3 center, float radius, out float t
         t1 = 0.0;
         return false;
     }
-    
+
     float h = sqrt(disc);
-    t0 = -b - h;  // Entry point
-    t1 = -b + h;  // Exit point
+    t0 = -b - h; // Entry point
+    t1 = -b + h; // Exit point
     return true;
 }
 
@@ -53,25 +45,25 @@ float coneSphereIntersect(vec3 ro, vec3 rd, float coneAngle, vec3 center, float 
 {
     vec3 oc = center - ro;
     float ocLen = length(oc);
-    
+
     // Early out if sphere is behind ray origin
     float proj = dot(oc, rd);
     if (proj < 0.0)
     {
         return 1e10; // No intersection
     }
-    
+
     // Distance from ray to sphere center
     vec3 projPoint = ro + rd * proj;
     float distToRay = length(center - projPoint);
-    
+
     // Cone radius at distance proj
     float coneRadius = proj * tan(coneAngle);
-    
+
     // Check if sphere intersects cone
     // Sphere intersects if: distToRay - radius < coneRadius
     float sphereRadiusAtRay = distToRay - radius;
-    
+
     if (sphereRadiusAtRay > coneRadius)
     {
         // Sphere is outside cone - safe to step forward
@@ -98,18 +90,23 @@ float coneSphereIntersect(vec3 ro, vec3 rd, float coneAngle, vec3 center, float 
 // planetRadius: planet radius
 // atmosphereRadius: atmosphere outer radius
 // Returns: safe step size that won't overshoot sphere boundaries
-float coneMarchStepSize(vec3 ro, vec3 rd, float coneAngle, vec3 planetCenter, float planetRadius, float atmosphereRadius)
+float coneMarchStepSize(vec3 ro,
+                        vec3 rd,
+                        float coneAngle,
+                        vec3 planetCenter,
+                        float planetRadius,
+                        float atmosphereRadius)
 {
     // Check intersection with planet (inner sphere)
     float planetStep = coneSphereIntersect(ro, rd, coneAngle, planetCenter, planetRadius);
-    
+
     // Check intersection with atmosphere (outer sphere)
     float atmoStep = coneSphereIntersect(ro, rd, coneAngle, planetCenter, atmosphereRadius);
-    
+
     // Use the minimum step size (most conservative)
     // But ensure we don't step past the atmosphere
     float step = min(planetStep, atmoStep);
-    
+
     // Clamp to reasonable bounds
     return clamp(step, 0.001, 1000.0);
 }
@@ -129,21 +126,21 @@ float coneMarchWaterStepSize(float currentDepth, float maxDepth, float coneAngle
 {
     // Remaining distance to floor
     float remainingToFloor = maxDepth - currentDepth;
-    
+
     // If very close to floor, use small steps
     if (remainingToFloor < 5.0)
     {
         return max(remainingToFloor * 0.5, minStep);
     }
-    
+
     // Cone-based adaptive step size
     // The cone expands linearly, so we can take larger steps when far from boundaries
     float coneExpansion = currentDepth * tan(coneAngle);
-    
+
     // Adaptive step based on distance to floor and cone expansion
     // When far from floor, use larger steps (limited by cone expansion)
     float adaptiveStep = min(remainingToFloor * 0.8, coneExpansion * 2.0);
-    
+
     // Clamp to reasonable bounds
     return clamp(adaptiveStep, minStep, maxStep);
 }
@@ -185,8 +182,8 @@ float sphereDistance(vec3 pos, vec3 center, float radius, out bool isInside)
 float computeMaskSDF(sampler2D maskSampler, vec2 uv)
 {
     // Sample mask (1.0 = solid, 0.0 = empty)
-    float maskValue = texture2D(maskSampler, uv).r;
-    
+    float maskValue = texture(maskSampler, uv).r;
+
     // Narrow-band optimization: early exit for deep empty/solid regions
     if (maskValue < 0.01)
     {
@@ -196,21 +193,21 @@ float computeMaskSDF(sampler2D maskSampler, vec2 uv)
     {
         return -1.0; // Deep solid - far from boundary
     }
-    
+
     // Near boundary - compute approximate SDF using gradient magnitude
     // This is more efficient than multi-directional search while still accurate
     float eps = 0.003; // Sampling offset for gradient computation
-    
+
     // Sample mask at nearby points to compute gradient
-    float maskX = texture2D(maskSampler, uv + vec2(eps, 0.0)).r;
-    float maskY = texture2D(maskSampler, uv + vec2(0.0, eps)).r;
-    float maskXNeg = texture2D(maskSampler, uv + vec2(-eps, 0.0)).r;
-    float maskYNeg = texture2D(maskSampler, uv + vec2(0.0, -eps)).r;
-    
+    float maskX = texture(maskSampler, uv + vec2(eps, 0.0)).r;
+    float maskY = texture(maskSampler, uv + vec2(0.0, eps)).r;
+    float maskXNeg = texture(maskSampler, uv + vec2(-eps, 0.0)).r;
+    float maskYNeg = texture(maskSampler, uv + vec2(0.0, -eps)).r;
+
     // Compute gradient magnitude (how quickly mask changes)
     vec2 gradient = vec2((maskX - maskXNeg) / (2.0 * eps), (maskY - maskYNeg) / (2.0 * eps));
     float gradientMag = length(gradient);
-    
+
     // Approximate distance to boundary using gradient magnitude
     // Steep gradient = close to boundary, shallow gradient = far from boundary
     float approximateDist = 0.0;
@@ -226,10 +223,10 @@ float computeMaskSDF(sampler2D maskSampler, vec2 uv)
         // Very shallow gradient - use fallback estimate
         approximateDist = abs(maskValue - 0.5) * 10.0; // Rough estimate
     }
-    
+
     // Convert to signed distance (positive in empty space, negative in solid)
     float sdf = maskValue < 0.5 ? approximateDist : -approximateDist;
-    
+
     return sdf;
 }
 
@@ -242,14 +239,14 @@ vec2 computeMaskSDFNormal(sampler2D maskSampler, vec2 uv)
 {
     // Compute SDF gradient using finite differences
     float eps = 0.003; // Small offset for gradient computation
-    
+
     float sdfCenter = computeMaskSDF(maskSampler, uv);
     float sdfX = computeMaskSDF(maskSampler, uv + vec2(eps, 0.0));
     float sdfY = computeMaskSDF(maskSampler, uv + vec2(0.0, eps));
-    
+
     // Compute gradient of SDF
     vec2 sdfGradient = vec2((sdfX - sdfCenter) / eps, (sdfY - sdfCenter) / eps);
-    
+
     // Normalize gradient to get normal
     // SDF gradient points from low values (solid) to high values (empty)
     float gradientLen = length(sdfGradient);
@@ -258,10 +255,10 @@ vec2 computeMaskSDFNormal(sampler2D maskSampler, vec2 uv)
         // Not near a boundary - return zero vector
         return vec2(0.0, 0.0);
     }
-    
+
     // Normalize to get unit normal (points from solid toward empty space)
     vec2 boundaryNormal = sdfGradient / gradientLen;
-    
+
     return boundaryNormal;
 }
 
@@ -276,58 +273,58 @@ vec2 applyBoundaryReflection(sampler2D maskSampler, vec2 trajectory, vec2 uv, fl
 {
     // Compute SDF at current location
     float sdf = computeMaskSDF(maskSampler, uv);
-    
+
     // Narrow-band optimization: only process near boundaries
     // Reflection threshold: only reflect when within this distance of boundary
     float reflectionThreshold = 0.05; // UV units
-    
+
     if (abs(sdf) > reflectionThreshold)
     {
         return trajectory; // Too far from boundary
     }
-    
+
     // Must be in empty space (positive SDF) to reflect
     if (sdf <= 0.0)
     {
         return trajectory; // In solid - no reflection
     }
-    
+
     // Get boundary normal from SDF gradient (accurate even on jagged boundaries)
     vec2 boundaryNormal = computeMaskSDFNormal(maskSampler, uv);
-    
+
     // If normal is invalid, return original trajectory
     float normalLen = length(boundaryNormal);
     if (normalLen < 0.01)
     {
         return trajectory; // Not near boundary
     }
-    
+
     // Check if trajectory is pointing toward solid
     // Boundary normal points from solid toward empty space
     // If trajectory points toward solid, dot product with normal will be negative
     float dotProduct = dot(trajectory, boundaryNormal);
-    
+
     if (dotProduct < 0.0)
     {
         // Trajectory is approaching solid - reflect it using standard reflection formula
         // Reflection: R = I - 2 * dot(I, N) * N
         vec2 reflectedTrajectory = trajectory - 2.0 * dotProduct * boundaryNormal;
-        
+
         // Compute reflection strength based on proximity to boundary
         // Closer to boundary = stronger reflection
         // Use SDF to determine proximity (sdf = 0 at boundary, increases with distance)
         float proximityFactor = 1.0 - smoothstep(0.0, reflectionThreshold, sdf);
-        
+
         // Blend between original and reflected trajectory
         // Energy-conserving: velocity magnitude preserved
         vec2 blendedTrajectory = normalize(mix(trajectory, reflectedTrajectory, reflectionStrength * proximityFactor));
-        
+
         // Apply damping near boundaries to prevent energy buildup
         float dampingFactor = clamp(sdf / reflectionThreshold, 0.3, 1.0);
-        
+
         return blendedTrajectory * dampingFactor;
     }
-    
+
     // Trajectory is moving away from solid - no reflection needed
     return trajectory;
 }

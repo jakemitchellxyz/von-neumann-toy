@@ -254,17 +254,18 @@ void DynamicLODSphere::renderTriangle(const glm::vec3 &v1,
     if (!isTriangleVisible(v1, v2, v3, n1, n2, n3, cameraPos, cameraDir, fovRadians, radius, disableCulling))
         return;
 
-    glTexCoord2f(uv1.x, uv1.y);
-    glNormal3f(n1.x, n1.y, n1.z);
-    glVertex3f(v1.x - position.x, v1.y - position.y, v1.z - position.z);
+    // TODO: Migrate dynamic LOD sphere rendering to Vulkan
+    // glTexCoord2f(uv1.x, uv1.y); // REMOVED - migrate to Vulkan vertex buffer
+    // glNormal3f(n1.x, n1.y, n1.z); // REMOVED - migrate to Vulkan vertex buffer
+    // glVertex3f(v1.x - position.x, v1.y - position.y, v1.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
-    glTexCoord2f(uv2.x, uv2.y);
-    glNormal3f(n2.x, n2.y, n2.z);
-    glVertex3f(v2.x - position.x, v2.y - position.y, v2.z - position.z);
+    // glTexCoord2f(uv2.x, uv2.y); // REMOVED - migrate to Vulkan vertex buffer
+    // glNormal3f(n2.x, n2.y, n2.z); // REMOVED - migrate to Vulkan vertex buffer
+    // glVertex3f(v2.x - position.x, v2.y - position.y, v2.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
-    glTexCoord2f(uv3.x, uv3.y);
-    glNormal3f(n3.x, n3.y, n3.z);
-    glVertex3f(v3.x - position.x, v3.y - position.y, v3.z - position.z);
+    // glTexCoord2f(uv3.x, uv3.y); // REMOVED - migrate to Vulkan vertex buffer
+    // glNormal3f(n3.x, n3.y, n3.z); // REMOVED - migrate to Vulkan vertex buffer
+    // glVertex3f(v3.x - position.x, v3.y - position.y, v3.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
     verticesDrawn += 3;
     CountTriangles(GL_TRIANGLES, 3);
@@ -423,8 +424,9 @@ void DynamicLODSphere::draw(const glm::vec3 &position,
 
         int verticesDrawn = 0;
 
+        // TODO: Migrate dynamic LOD sphere rendering to Vulkan
         // Render pie-style circle as flat fan of triangles
-        glBegin(GL_TRIANGLES);
+        // glBegin(GL_TRIANGLES); // REMOVED - migrate to Vulkan
         if (disableCulling)
         {
             glColor3f(0.8f, 0.9f, 1.0f);
@@ -477,26 +479,26 @@ void DynamicLODSphere::draw(const glm::vec3 &position,
                                                     radius,
                                                     disableCulling))
             {
-                glTexCoord2f(centerUV.x, centerUV.y);
-                glNormal3f(centerNormal.x, centerNormal.y, centerNormal.z);
-                glVertex3f(closestPointOnSphere.x - position.x,
-                           closestPointOnSphere.y - position.y,
-                           closestPointOnSphere.z - position.z);
+                // glTexCoord2f(centerUV.x, centerUV.y); // REMOVED - migrate to Vulkan vertex buffer
+                // glNormal3f(centerNormal.x, centerNormal.y, centerNormal.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(closestPointOnSphere.x - position.x,
+                //            closestPointOnSphere.y - position.y,
+                //            closestPointOnSphere.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
-                glTexCoord2f(uv1.x, uv1.y);
-                glNormal3f(normal1.x, normal1.y, normal1.z);
-                glVertex3f(flatPoint1.x - position.x, flatPoint1.y - position.y, flatPoint1.z - position.z);
+                // glTexCoord2f(uv1.x, uv1.y); // REMOVED - migrate to Vulkan vertex buffer
+                // glNormal3f(normal1.x, normal1.y, normal1.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(flatPoint1.x - position.x, flatPoint1.y - position.y, flatPoint1.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
-                glTexCoord2f(uv2.x, uv2.y);
-                glNormal3f(normal2.x, normal2.y, normal2.z);
-                glVertex3f(flatPoint2.x - position.x, flatPoint2.y - position.y, flatPoint2.z - position.z);
+                // glTexCoord2f(uv2.x, uv2.y); // REMOVED - migrate to Vulkan vertex buffer
+                // glNormal3f(normal2.x, normal2.y, normal2.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(flatPoint2.x - position.x, flatPoint2.y - position.y, flatPoint2.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
                 verticesDrawn += 3;
                 CountTriangles(GL_TRIANGLES, 3);
             }
         }
 
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
         glPopMatrix();
         return;
     }
@@ -545,8 +547,9 @@ void DynamicLODSphere::draw(const glm::vec3 &position,
 
     int verticesDrawn = 0;
 
+    // TODO: Migrate dynamic LOD sphere rendering to Vulkan
     // First pass: Render base-resolution mesh for entire sphere
-    glBegin(GL_TRIANGLES);
+    // glBegin(GL_TRIANGLES); // REMOVED - migrate to Vulkan
     if (disableCulling)
     {
         glColor3f(0.8f, 0.9f, 1.0f);
@@ -657,7 +660,7 @@ void DynamicLODSphere::draw(const glm::vec3 &position,
         if (targetSlices <= baseSlices && targetStacks <= baseStacks)
             continue;
 
-        glBegin(GL_TRIANGLES);
+        // glBegin(GL_TRIANGLES); // REMOVED - migrate to Vulkan
         if (disableCulling)
         {
             glColor3f(0.8f, 0.9f, 1.0f);
@@ -788,7 +791,7 @@ void DynamicLODSphere::draw(const glm::vec3 &position,
                 }
             }
         }
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
     }
 
     glPopMatrix();

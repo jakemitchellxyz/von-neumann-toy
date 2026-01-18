@@ -1,5 +1,16 @@
 #pragma once
 
+// Protect from Windows.h macros that conflict with DrawText
+#ifdef DrawText
+#undef DrawText
+#endif
+#ifdef DrawTextA
+#undef DrawTextA
+#endif
+#ifdef DrawTextW
+#undef DrawTextW
+#endif
+
 #include <glm/glm.hpp>
 #include <map>
 #include <string>

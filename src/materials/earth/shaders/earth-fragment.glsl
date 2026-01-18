@@ -1,50 +1,60 @@
-#version 120
-#extension GL_ARB_shader_texture_lod : enable
+#version 450
+#extension GL_EXT_scalar_block_layout : require
 
 // Inputs from vertex shader
-varying vec3 vWorldPos;
-varying vec3 vWorldNormal;
-varying vec2 vTexCoord; // Equirectangular UV from sphere geometry
+layout(location = 0) in vec3 vWorldPos;
+layout(location = 1) in vec3 vWorldNormal;
+layout(location = 2) in vec2 vTexCoord; // Equirectangular UV from sphere geometry
 
-// Uniforms
-uniform sampler2D uColorTexture;
-uniform sampler2D uColorTexture2;
-uniform float uBlendFactor;
-uniform sampler2D uNormalMap;
-uniform sampler2D uHeightmap;        // Landmass heightmap (grayscale)
-uniform sampler2D uNightlights;      // City lights grayscale texture
-uniform sampler2D uMicroNoise;       // Fine-grained noise for per-second flicker
-uniform sampler2D uHourlyNoise;      // Coarse noise for hourly variation
-uniform sampler2D uSpecular;         // Surface specular/roughness (grayscale)
-uniform sampler2D uIceMask;          // Ice coverage mask (current month)
-uniform sampler2D uIceMask2;         // Ice coverage mask (next month)
-uniform sampler2D uLandmassMask;     // Landmass mask (white=land, black=ocean)
-uniform sampler2D uBathymetryDepth;  // Ocean floor depth (0=surface, 1=deepest ~11km)
-uniform sampler2D uBathymetryNormal; // Ocean floor normal map
-uniform sampler2D uCombinedNormal;   // Combined normal map (landmass + bathymetry) for shadows
-uniform sampler2D uWindTexture1;     // Wind texture for current month (RG = u, v components)
-uniform sampler2D uWindTexture2;     // Wind texture for next month (RG = u, v components)
-uniform float uWindBlendFactor;      // Blend factor between current and next month (0-1)
-uniform vec2 uWindTextureSize;       // Wind texture resolution (width, height) for UV normalization
-uniform float uIceBlendFactor;       // Blend factor between ice masks (0-1)
-uniform vec3 uLightDir;
-uniform vec3 uLightColor;
-uniform vec3 uMoonDir;   // Direction to moon from Earth
-uniform vec3 uMoonColor; // Moonlight color and intensity (pre-multiplied)
-uniform vec3 uAmbientColor;
-uniform vec3 uPoleDir;          // Planet's north pole direction
-uniform vec3 uPrimeMeridianDir; // Planet's prime meridian direction (for coordinate system)
-uniform vec3 uCameraPos;        // Camera position for view direction calculations
-uniform vec3 uCameraDir;        // Camera forward direction
-uniform float uCameraFOV;       // Camera field of view (radians)
-uniform int uUseNormalMap;      // 0 = disabled, 1 = enabled
-uniform int uUseHeightmap;      // 0 = disabled, 1 = enabled
-uniform int uUseSpecular;       // 0 = disabled, 1 = enabled
-uniform float uTime;            // Julian date fraction for animated noise
-uniform int uFlatCircleMode;    // 1 = rendering flat circle for distant sphere, 0 = normal sphere
-uniform vec3 uSphereCenter;     // Sphere center position (for flat circle projection)
-uniform float uSphereRadius;    // Sphere radius (for flat circle projection)
-uniform vec3 uBillboardCenter;  // Billboard center position (closest point on sphere to camera)
+// Fragment shader output
+layout(location = 0) out vec4 fragColor;
+
+// Uniforms - Samplers (require binding qualifiers for Vulkan)
+layout(binding = 0) uniform sampler2D uColorTexture;
+layout(binding = 1) uniform sampler2D uColorTexture2;
+layout(binding = 2) uniform sampler2D uNormalMap;
+layout(binding = 3) uniform sampler2D uHeightmap;         // Landmass heightmap (grayscale)
+layout(binding = 4) uniform sampler2D uNightlights;       // City lights grayscale texture
+layout(binding = 5) uniform sampler2D uMicroNoise;        // Fine-grained noise for per-second flicker
+layout(binding = 6) uniform sampler2D uHourlyNoise;       // Coarse noise for hourly variation
+layout(binding = 7) uniform sampler2D uSpecular;          // Surface specular/roughness (grayscale)
+layout(binding = 8) uniform sampler2D uIceMask;           // Ice coverage mask (current month)
+layout(binding = 9) uniform sampler2D uIceMask2;          // Ice coverage mask (next month)
+layout(binding = 10) uniform sampler2D uLandmassMask;     // Landmass mask (white=land, black=ocean)
+layout(binding = 11) uniform sampler2D uBathymetryDepth;  // Ocean floor depth (0=surface, 1=deepest ~11km)
+layout(binding = 12) uniform sampler2D uBathymetryNormal; // Ocean floor normal map
+layout(binding = 13) uniform sampler2D uCombinedNormal;   // Combined normal map (landmass + bathymetry) for shadows
+layout(binding = 14) uniform sampler2D uWindTexture1;     // Wind texture for current month (RG = u, v components)
+layout(binding = 15) uniform sampler2D uWindTexture2;     // Wind texture for next month (RG = u, v components)
+
+// Uniform block for non-opaque uniforms (required for Vulkan)
+// Using scalar block layout for efficient packing (Vulkan 1.3+)
+layout(set = 0, binding = 16, scalar) uniform Uniforms
+{
+    float uBlendFactor;
+    float uWindBlendFactor;
+    vec2 uWindTextureSize;
+    float uIceBlendFactor;
+    vec3 uLightDir;
+    vec3 uLightColor;
+    vec3 uMoonDir;
+    vec3 uMoonColor;
+    vec3 uAmbientColor;
+    vec3 uPoleDir;
+    vec3 uPrimeMeridianDir;
+    vec3 uCameraPos;
+    vec3 uCameraDir;
+    float uCameraFOV;
+    int uUseNormalMap;
+    int uUseHeightmap;
+    int uUseSpecular;
+    float uTime;
+    int uFlatCircleMode;
+    vec3 uSphereCenter;
+    float uSphereRadius;
+    vec3 uBillboardCenter;
+    int uShowWireframe;
+};
 
 // Constants
 const float PI = 3.14159265359;
@@ -204,7 +214,7 @@ vec2 toSinusoidalUV(vec2 equirectUV)
 // Decode normal map sample with UV coordinate swapping pattern
 // The normal map has U and V components swapped every 180 degrees (checkerboard pattern)
 // This function detects the pattern and swaps back to get the correct normal
-vec3 decodeSwappedNormalMap(vec4 sample, vec2 texUV)
+vec3 decodeSwappedNormalMap(vec4 normalSample, vec2 texUV)
 {
     // Determine which quadrant we're in (0-3) based on 180-degree boundaries
     int uQuadrant = int(floor(texUV.x * 2.0));
@@ -220,16 +230,16 @@ vec3 decodeSwappedNormalMap(vec4 sample, vec2 texUV)
     if (swapUV)
     {
         // Normal map has (V, U, Z) - swap back to (U, V, Z)
-        normalTangent.x = sample.g * 2.0 - 1.0;   // U from V slot
-        normalTangent.y = (sample.r * 2.0 - 1.0); // V from U slot
-        normalTangent.z = sample.b * 2.0 - 1.0;   // Z unchanged
+        normalTangent.x = normalSample.g * 2.0 - 1.0;   // U from V slot
+        normalTangent.y = (normalSample.r * 2.0 - 1.0); // V from U slot
+        normalTangent.z = normalSample.b * 2.0 - 1.0;   // Z unchanged
     }
     else
     {
         // Normal order: (U, V, Z)
-        normalTangent.x = sample.r * 2.0 - 1.0;
-        normalTangent.y = (sample.g * 2.0 - 1.0);
-        normalTangent.z = sample.b * 2.0 - 1.0;
+        normalTangent.x = normalSample.r * 2.0 - 1.0;
+        normalTangent.y = (normalSample.g * 2.0 - 1.0);
+        normalTangent.z = normalSample.b * 2.0 - 1.0;
     }
 
     return normalTangent;
@@ -308,8 +318,8 @@ vec2 computeWindNoiseOffset(vec2 uv, float time)
     // Wind texture format: GL_LUMINANCE_ALPHA stores R=u (red/LUMINANCE) and G=v (green/ALPHA)
     // Sample red presence (R channel) for u direction and green presence (G channel) for v direction
     // GL_LUMINANCE_ALPHA format samples as (L, L, L, A), so we use .ra to get (u, v)
-    vec4 windSample1Full = texture2D(uWindTexture1, windUV);
-    vec4 windSample2Full = texture2D(uWindTexture2, windUV);
+    vec4 windSample1Full = texture(uWindTexture1, windUV);
+    vec4 windSample2Full = texture(uWindTexture2, windUV);
     // Extract u component from red/LUMINANCE channel, v component from green/ALPHA channel
     vec2 windSample1 = vec2(windSample1Full.r, windSample1Full.a); // .ra = (u, v) from LUMINANCE_ALPHA
     vec2 windSample2 = vec2(windSample2Full.r, windSample2Full.a); // .ra = (u, v) from LUMINANCE_ALPHA
@@ -395,7 +405,7 @@ vec2 computeNoiseGradient(vec2 uv, float scale)
 float computeShorelineSDF(vec2 uv)
 {
     // Sample mask (1.0 = land, 0.0 = ocean)
-    float maskValue = texture2D(uLandmassMask, uv).r;
+    float maskValue = texture(uLandmassMask, uv).r;
 
     // Narrow-band optimization: early exit for deep empty/solid regions
     if (maskValue < 0.01)
@@ -411,10 +421,10 @@ float computeShorelineSDF(vec2 uv)
     float eps = 0.003; // Sampling offset for gradient computation
 
     // Sample mask at nearby points to compute gradient
-    float maskX = texture2D(uLandmassMask, uv + vec2(eps, 0.0)).r;
-    float maskY = texture2D(uLandmassMask, uv + vec2(0.0, eps)).r;
-    float maskXNeg = texture2D(uLandmassMask, uv + vec2(-eps, 0.0)).r;
-    float maskYNeg = texture2D(uLandmassMask, uv + vec2(0.0, -eps)).r;
+    float maskX = texture(uLandmassMask, uv + vec2(eps, 0.0)).r;
+    float maskY = texture(uLandmassMask, uv + vec2(0.0, eps)).r;
+    float maskXNeg = texture(uLandmassMask, uv + vec2(-eps, 0.0)).r;
+    float maskYNeg = texture(uLandmassMask, uv + vec2(0.0, -eps)).r;
 
     // Compute gradient magnitude (how quickly mask changes)
     vec2 gradient = vec2((maskX - maskXNeg) / (2.0 * eps), (maskY - maskYNeg) / (2.0 * eps));
@@ -531,8 +541,8 @@ vec2 computeBaseTrajectory(vec2 uv, float time)
     // Sample both wind textures
     // Note: Textures are stored as GL_LUMINANCE_ALPHA, which samples as (L, L, L, A)
     // So we use .ra to get (LUMINANCE=u wind, ALPHA=v wind) = (u, v) force vector
-    vec4 windSample1Full = texture2D(uWindTexture1, windUV);
-    vec4 windSample2Full = texture2D(uWindTexture2, windUV);
+    vec4 windSample1Full = texture(uWindTexture1, windUV);
+    vec4 windSample2Full = texture(uWindTexture2, windUV);
     vec2 windSample1 = vec2(windSample1Full.r, windSample1Full.a); // .ra = (u, v) from LUMINANCE_ALPHA
     vec2 windSample2 = vec2(windSample2Full.r, windSample2Full.a); // .ra = (u, v) from LUMINANCE_ALPHA
 
@@ -1310,7 +1320,7 @@ float getWaterPathMultiplier(float NdotL, float depthMeters)
 vec3 computeCombinedNormalMap(vec2 texUV, vec3 surfaceNormal, vec3 tangent, vec3 bitangent)
 {
     // Sample landmass mask
-    float landMask = texture2DLod(uLandmassMask, texUV, 0.0).r;
+    float landMask = textureLod(uLandmassMask, texUV, 0.0).r;
     float oceanMask = 1.0 - landMask;
 
     // Initialize combined normal to base sphere normal
@@ -1320,7 +1330,7 @@ vec3 computeCombinedNormalMap(vec2 texUV, vec3 surfaceNormal, vec3 tangent, vec3
     if (landMask > 0.01 && uUseNormalMap == 1)
     {
         // Sample landmass normal map with UV swapping pattern
-        vec4 normalSample = texture2DLod(uNormalMap, texUV, 0.0);
+        vec4 normalSample = textureLod(uNormalMap, texUV, 0.0);
         vec3 landNormalTangent = decodeSwappedNormalMap(normalSample, texUV);
 
         // Build TBN matrix for landmass
@@ -1335,7 +1345,7 @@ vec3 computeCombinedNormalMap(vec2 texUV, vec3 surfaceNormal, vec3 tangent, vec3
     if (oceanMask > 0.01 && uUseNormalMap == 1)
     {
         // Sample bathymetry normal map with UV swapping pattern
-        vec4 normalSample = texture2DLod(uBathymetryNormal, texUV, 0.0);
+        vec4 normalSample = textureLod(uBathymetryNormal, texUV, 0.0);
         vec3 bathymetryNormalTangent = decodeSwappedNormalMap(normalSample, texUV);
 
         // Build TBN matrix for bathymetry (same as landmass)
@@ -1369,7 +1379,7 @@ TextureSamples sampleLandmassTextures(vec2 texUV, float oceanMask, vec3 worldPos
     TextureSamples samples;
 
     // ALWAYS sample all textures - they are required
-    samples.height = texture2D(uHeightmap, texUV).r;
+    samples.height = texture(uHeightmap, texUV).r;
 
     // For ocean areas, use flat normal (no Perlin noise)
     if (oceanMask > 0.01)
@@ -1382,7 +1392,7 @@ TextureSamples sampleLandmassTextures(vec2 texUV, float oceanMask, vec3 worldPos
     else
     {
         // For land areas, sample the normal map texture with UV swapping pattern
-        vec4 normalSample = texture2D(uNormalMap, texUV);
+        vec4 normalSample = texture(uNormalMap, texUV);
         samples.normalTangent = decodeSwappedNormalMap(normalSample, texUV);
         // Sample roughness texture for land (already masked, ocean = 0)
         // Texture is inverted: lighter = less rough, darker = rougher
@@ -1390,7 +1400,7 @@ TextureSamples sampleLandmassTextures(vec2 texUV, float oceanMask, vec3 worldPos
         if (uUseSpecular == 1)
         {
             // Sample roughness texture using same UV coordinates as other textures
-            vec4 roughnessSample = texture2D(uSpecular, texUV);
+            vec4 roughnessSample = texture(uSpecular, texUV);
             samples.roughness = roughnessSample.r;
         }
         else
@@ -1545,17 +1555,17 @@ void main()
     vec3 viewDir = normalize(uCameraPos - actualWorldPos);
 
     // Sample color textures and blend
-    vec4 col1 = texture2D(uColorTexture, texUV);
-    vec4 col2 = texture2D(uColorTexture2, texUV);
+    vec4 col1 = texture(uColorTexture, texUV);
+    vec4 col2 = texture(uColorTexture2, texUV);
     vec4 baseColor = mix(col1, col2, uBlendFactor);
 
     // Land/Ocean Mask
-    float landMask = texture2D(uLandmassMask, texUV).r;
+    float landMask = texture(uLandmassMask, texUV).r;
     float oceanMask = 1.0 - landMask; // Invert for ocean areas
 
     // Sample ice masks and blend between months for smooth seasonal transition
-    float iceMask1 = texture2D(uIceMask, texUV).r;
-    float iceMask2 = texture2D(uIceMask2, texUV).r;
+    float iceMask1 = texture(uIceMask, texUV).r;
+    float iceMask2 = texture(uIceMask2, texUV).r;
     float iceCoverage = mix(iceMask1, iceMask2, uIceBlendFactor);
 
     // Ice has higher reflectance (shinier) than regular land
@@ -1605,7 +1615,7 @@ void main()
     vec4 finalAlbedo = vec4(surfaceProps.color, baseColor.a);
 
     // Sample nightlights (grayscale - city lights intensity)
-    float lightsIntensity = texture2D(uNightlights, texUV).r;
+    float lightsIntensity = texture(uNightlights, texUV).r;
 
     // Use the final normal from texture effects (already computed in applyTextureEffects)
     vec3 N = surfaceProps.normal;
@@ -1719,7 +1729,7 @@ void main()
             float baseMetalness = (1.0 - roughness) * 0.03; // Very small base: max 0.03
 
             // Check if this is water (ocean) - slightly increase metalness for water
-            float landMaskForMetalness = texture2D(uLandmassMask, texUV).r;
+            float landMaskForMetalness = texture(uLandmassMask, texUV).r;
             float oceanMaskForMetalness = 1.0 - landMaskForMetalness;
             float waterMetalnessBoost = oceanMaskForMetalness > 0.01 ? 0.02 : 0.0; // Small boost for water only
 
@@ -1956,7 +1966,7 @@ void main()
         vec2 hourlyUV = fract(texUV + hourlyOffset);
 
         // Sample noise texture (stores values 0-1, we need -1 to 1)
-        float noise = texture2D(uHourlyNoise, hourlyUV).r * 2.0 - 1.0;
+        float noise = texture(uHourlyNoise, hourlyUV).r * 2.0 - 1.0;
 
         // Map noise from [-1,1] to darkening factor [0,1]
         float darkenAmount = (noise + 1.0) * 0.5;
@@ -1982,7 +1992,7 @@ void main()
         vec2 microUV = fract(texUV + microOffset);
 
         // Sample noise texture (stores values 0-1, we need -1 to 1)
-        float microNoise = texture2D(uMicroNoise, microUV).r * 2.0 - 1.0;
+        float microNoise = texture(uMicroNoise, microUV).r * 2.0 - 1.0;
 
         // Scale flicker intensity based on how dim the light is
         // flickerEligibility goes 0→1 as lights get dimmer (50%→0%)
@@ -2010,5 +2020,36 @@ void main()
     // Roughness from texture is already applied to surfaceProps.roughness and affects PBR specular reflection
     vec3 finalColor = dayColor * surfaceDim + emissive;
 
-    gl_FragColor = vec4(finalColor, finalAlbedo.a);
+    // Wireframe overlay: detect triangle edges using screen-space derivatives
+    if (uShowWireframe == 1)
+    {
+        // Compute screen-space derivatives of the position
+        // On triangle edges, these derivatives will be large (discontinuity)
+        vec3 dx = dFdx(vWorldPos);
+        vec3 dy = dFdy(vWorldPos);
+
+        // Compute the magnitude of the derivatives
+        // Large derivatives indicate we're crossing a triangle edge
+        float edgeFactor = length(dx) + length(dy);
+
+        // Also check texture coordinate derivatives as a secondary method
+        vec2 dxUV = dFdx(vTexCoord);
+        vec2 dyUV = dFdy(vTexCoord);
+        float edgeFactorUV = length(dxUV) + length(dyUV);
+
+        // Combine both methods - use the maximum for better edge detection
+        // Scale factors tuned for typical Earth rendering scale
+        float combinedEdgeFactor = max(edgeFactor * 0.1, edgeFactorUV * 50.0);
+
+        // Detect edges: use smoothstep for anti-aliased wireframe lines
+        // Threshold values tuned to show triangle edges clearly
+        float wireframeLine = 1.0 - smoothstep(0.3, 1.0, combinedEdgeFactor);
+
+        // Blend wireframe color (light blue) with final color
+        // Use stronger blend for better visibility
+        vec3 wireframeColor = vec3(0.4, 0.6, 1.0); // Light blue
+        finalColor = mix(finalColor, wireframeColor, wireframeLine * 0.9);
+    }
+
+    fragColor = vec4(finalColor, finalAlbedo.a);
 }

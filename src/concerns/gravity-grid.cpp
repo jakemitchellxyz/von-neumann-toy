@@ -179,8 +179,9 @@ void GravityGrid::draw(const glm::vec3& cameraPos) const {
     
     glDisable(GL_LIGHTING);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glLineWidth(1.0f);
+    // TODO: Migrate gravity grid rendering to Vulkan
+    // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // REMOVED - migrate to Vulkan pipeline blend state
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
     
     int gridLines = currentGridLines;
     
@@ -198,21 +199,22 @@ void GravityGrid::draw(const glm::vec3& cameraPos) const {
     
     // XZ planes (horizontal) - slightly blue tint
     for (const auto& plane : xzPlanes) {
+        // TODO: Migrate gravity grid rendering to Vulkan
         // Draw lines along X
         for (int j = 0; j < gridLines; ++j) {
-            glBegin(GL_LINE_STRIP);
+            // glBegin(GL_LINE_STRIP); // REMOVED - migrate to Vulkan
             for (int i = 0; i < gridLines; ++i) {
                 int idx = i * gridLines + j;
                 if (idx < static_cast<int>(plane.size())) {
                     const glm::vec3& v = plane[idx];
                     float alpha = getAlpha(v, 0.4f);
                     if (alpha > 0.001f) {
-                        glColor4f(0.4f, 0.45f, 0.55f, alpha);
-                        glVertex3f(v.x, v.y, v.z);
+                        // glColor4f(0.4f, 0.45f, 0.55f, alpha); // REMOVED - migrate to Vulkan uniform buffer
+                        // glVertex3f(v.x, v.y, v.z); // REMOVED - migrate to Vulkan vertex buffer
                     }
                 }
             }
-            glEnd();
+            // glEnd(); // REMOVED - migrate to Vulkan
         }
         // Draw lines along Z
         for (int i = 0; i < gridLines; ++i) {
@@ -223,32 +225,33 @@ void GravityGrid::draw(const glm::vec3& cameraPos) const {
                     const glm::vec3& v = plane[idx];
                     float alpha = getAlpha(v, 0.4f);
                     if (alpha > 0.001f) {
-                        glColor4f(0.4f, 0.45f, 0.55f, alpha);
-                        glVertex3f(v.x, v.y, v.z);
+                        // glColor4f(0.4f, 0.45f, 0.55f, alpha); // REMOVED - migrate to Vulkan uniform buffer
+                        // glVertex3f(v.x, v.y, v.z); // REMOVED - migrate to Vulkan vertex buffer
                     }
                 }
             }
-            glEnd();
+            // glEnd(); // REMOVED - migrate to Vulkan
         }
     }
     
     // XY planes (vertical, facing Z) - slightly green tint
     for (const auto& plane : xyPlanes) {
+        // TODO: Migrate gravity grid rendering to Vulkan
         // Draw lines along X
         for (int j = 0; j < gridLines; ++j) {
-            glBegin(GL_LINE_STRIP);
+            // glBegin(GL_LINE_STRIP); // REMOVED - migrate to Vulkan
             for (int i = 0; i < gridLines; ++i) {
                 int idx = i * gridLines + j;
                 if (idx < static_cast<int>(plane.size())) {
                     const glm::vec3& v = plane[idx];
                     float alpha = getAlpha(v, 0.35f);
                     if (alpha > 0.001f) {
-                        glColor4f(0.4f, 0.55f, 0.45f, alpha);
-                        glVertex3f(v.x, v.y, v.z);
+                        // glColor4f(0.4f, 0.55f, 0.45f, alpha); // REMOVED - migrate to Vulkan uniform buffer
+                        // glVertex3f(v.x, v.y, v.z); // REMOVED - migrate to Vulkan vertex buffer
                     }
                 }
             }
-            glEnd();
+            // glEnd(); // REMOVED - migrate to Vulkan
         }
         // Draw lines along Y
         for (int i = 0; i < gridLines; ++i) {
@@ -259,12 +262,12 @@ void GravityGrid::draw(const glm::vec3& cameraPos) const {
                     const glm::vec3& v = plane[idx];
                     float alpha = getAlpha(v, 0.35f);
                     if (alpha > 0.001f) {
-                        glColor4f(0.4f, 0.55f, 0.45f, alpha);
-                        glVertex3f(v.x, v.y, v.z);
+                        // glColor4f(0.4f, 0.55f, 0.45f, alpha); // REMOVED - migrate to Vulkan uniform buffer
+                        // glVertex3f(v.x, v.y, v.z); // REMOVED - migrate to Vulkan vertex buffer
                     }
                 }
             }
-            glEnd();
+            // glEnd(); // REMOVED - migrate to Vulkan
         }
     }
     
@@ -272,19 +275,19 @@ void GravityGrid::draw(const glm::vec3& cameraPos) const {
     for (const auto& plane : yzPlanes) {
         // Draw lines along Y
         for (int j = 0; j < gridLines; ++j) {
-            glBegin(GL_LINE_STRIP);
+            // glBegin(GL_LINE_STRIP); // REMOVED - migrate to Vulkan
             for (int i = 0; i < gridLines; ++i) {
                 int idx = i * gridLines + j;
                 if (idx < static_cast<int>(plane.size())) {
                     const glm::vec3& v = plane[idx];
                     float alpha = getAlpha(v, 0.35f);
                     if (alpha > 0.001f) {
-                        glColor4f(0.55f, 0.45f, 0.4f, alpha);
-                        glVertex3f(v.x, v.y, v.z);
+                        // glColor4f(0.55f, 0.45f, 0.4f, alpha); // REMOVED - migrate to Vulkan uniform buffer
+                        // glVertex3f(v.x, v.y, v.z); // REMOVED - migrate to Vulkan vertex buffer
                     }
                 }
             }
-            glEnd();
+            // glEnd(); // REMOVED - migrate to Vulkan
         }
         // Draw lines along Z
         for (int i = 0; i < gridLines; ++i) {
@@ -295,12 +298,12 @@ void GravityGrid::draw(const glm::vec3& cameraPos) const {
                     const glm::vec3& v = plane[idx];
                     float alpha = getAlpha(v, 0.35f);
                     if (alpha > 0.001f) {
-                        glColor4f(0.55f, 0.45f, 0.4f, alpha);
-                        glVertex3f(v.x, v.y, v.z);
+                        // glColor4f(0.55f, 0.45f, 0.4f, alpha); // REMOVED - migrate to Vulkan uniform buffer
+                        // glVertex3f(v.x, v.y, v.z); // REMOVED - migrate to Vulkan vertex buffer
                     }
                 }
             }
-            glEnd();
+            // glEnd(); // REMOVED - migrate to Vulkan
         }
     }
     

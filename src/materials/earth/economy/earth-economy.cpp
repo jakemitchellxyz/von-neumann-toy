@@ -1,15 +1,13 @@
 #include "earth-economy.h"
 #include "../../../concerns/constants.h"
+#include "../../../concerns/helpers/gl.h"
 #include "../../../concerns/settings.h"
-#include "../../helpers/gl.h"
 #include "../helpers/coordinate-conversion.h"
-
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
-#include <limits>
 #include <mutex>
 // Removed shared_mutex - no longer needed since we're just appending all cities
 #include <string>
@@ -939,7 +937,8 @@ void EarthEconomy::cleanup()
 {
     if (cityTexture_ != 0)
     {
-        glDeleteTextures(1, &cityTexture_);
+        // TODO: Migrate texture cleanup to Vulkan
+        // glDeleteTextures(1, &cityTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         cityTexture_ = 0;
     }
 

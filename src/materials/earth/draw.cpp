@@ -3,20 +3,21 @@
 // ============================================================================
 
 #include "../../concerns/constants.h"
-#include "../../concerns/font-rendering.h"
+#include "../../concerns/helpers/gl.h"
+#include "../../concerns/helpers/vulkan.h"
 #include "../../concerns/ui-overlay.h"
-#include "../helpers/gl.h"
 #include "earth-material.h"
-#include "helpers/coordinate-conversion.h"
 
 #include <array>
 #include <cmath>
+#include <cstddef> // for offsetof
 #include <cstdlib>
+#include <cstring> // for memcpy
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp> // for lookAt, perspective
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
 #include <tuple>
-#include <utility>
 
 namespace
 {
@@ -31,6 +32,11 @@ static float g_cameraFovRadians = glm::radians(60.0f);
 // Screen dimensions for depth buffer queries (set before rendering)
 static int g_screenWidth = 1920;
 static int g_screenHeight = 1080;
+
+// View and projection matrices for Vulkan rendering (set before rendering each frame)
+static glm::mat4 g_viewMatrix = glm::mat4(1.0f);
+static glm::mat4 g_projectionMatrix = glm::mat4(1.0f);
+static bool g_matricesSet = false;
 
 // Check if a triangle is occluded by checking depth buffer at its vertices
 // This is expensive (3 glReadPixels calls per triangle), so use sparingly
@@ -134,6 +140,27 @@ void EarthMaterial::setScreenDimensions(int width, int height)
 {
     g_screenWidth = width;
     g_screenHeight = height;
+}
+
+// Set view and projection matrices for Vulkan rendering
+void EarthMaterial::setViewProjectionMatrices(const glm::mat4 &viewMatrix, const glm::mat4 &projectionMatrix)
+{
+    g_viewMatrix = viewMatrix;
+    // Convert OpenGL-style projection matrix to Vulkan format by flipping Y-axis
+    // Vulkan's NDC has Y pointing down, while OpenGL has Y pointing up
+    glm::mat4 vulkanFlip = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
+    g_projectionMatrix = vulkanFlip * projectionMatrix;
+    g_matricesSet = true;
+}
+
+glm::mat4 EarthMaterial::getViewMatrix()
+{
+    return g_viewMatrix;
+}
+
+glm::mat4 EarthMaterial::getProjectionMatrix()
+{
+    return g_projectionMatrix;
 }
 
 // Calculate dynamic tessellation based on camera distance
@@ -256,11 +283,19 @@ void EarthMaterial::draw(const glm::vec3 &position,
 
     if (!shaderAvailable_)
     {
-        std::cerr << "ERROR: EarthMaterial::draw() - Shader not available!" << "\n";
-        std::cerr << "  Shader compilation or linking failed. Check console "
-                     "for shader errors."
-                  << "\n";
-        std::exit(1);
+        static bool errorPrinted = false;
+        if (!errorPrinted)
+        {
+            std::cerr << "ERROR: EarthMaterial::draw() - Shader not available!" << "\n";
+            std::cerr << "  Shader compilation or linking failed. Check console "
+                         "for shader errors."
+                      << "\n";
+            std::cerr << "  NOTE: Vulkan shader compilation requires glslangValidator from the Vulkan SDK." << "\n";
+            std::cerr << "  Install Vulkan SDK from https://vulkan.lunarg.com/ and set VULKAN_SDK environment variable."
+                      << "\n";
+            errorPrinted = true;
+        }
+        return; // Return early instead of exiting - allows application to continue (though rendering won't work)
     }
 
     if (!elevationLoaded_)
@@ -277,484 +312,562 @@ void EarthMaterial::draw(const glm::vec3 &position,
         std::exit(1);
     }
 
+    // Generate octree mesh on first use (MANDATORY - required for rendering)
+    if (!meshGenerated_)
+    {
+        if (!elevationLoaded_)
+        {
+            std::cerr << "ERROR: EarthMaterial::draw() - Cannot generate octree mesh without elevation data!" << "\n";
+            std::cerr << "  Elevation data must be loaded before rendering." << "\n";
+            std::exit(1);
+        }
+
+        // Calculate max radius (exosphere): Earth radius + 10,000 km atmosphere
+        const float EARTH_RADIUS_KM = 6371.0f;
+        const float EXOSPHERE_HEIGHT_KM = 10000.0f;
+        float maxRadius = displayRadius * (1.0f + EXOSPHERE_HEIGHT_KM / EARTH_RADIUS_KM);
+        generateOctreeMesh(displayRadius, maxRadius);
+
+        // Verify octree was built successfully (we're using voxels directly, not meshes)
+        if (!meshGenerated_ || !octreeMesh_)
+        {
+            std::cerr << "ERROR: EarthMaterial::draw() - Failed to build octree!" << "\n";
+            std::cerr << "  Octree build completed but octree is null or invalid." << "\n";
+            std::exit(1);
+        }
+    }
+
     // Use shader-based rendering (MANDATORY - no fallback)
     {
-        // Get current matrices from OpenGL fixed-function state
-        std::array<GLfloat, OPENGL_MATRIX_SIZE> modelviewMatrix{};
-        std::array<GLfloat, OPENGL_MATRIX_SIZE> projectionMatrix{};
-        glGetFloatv(GL_MODELVIEW_MATRIX, modelviewMatrix.data());
-        glGetFloatv(GL_PROJECTION_MATRIX, projectionMatrix.data());
+        // Get Vulkan command buffer for recording draw commands
+        extern VulkanContext *g_vulkanContext;
+        if (!g_vulkanContext || graphicsPipeline_ == VK_NULL_HANDLE)
+        {
+            std::cerr << "ERROR: Vulkan not initialized or pipeline not created!" << "\n";
+            return;
+        }
 
-        // Use the sunDirection passed as parameter - this is the direction FROM
-        // Earth TO Sun computed correctly in celestial-body.cpp as
-        // normalize(sunPos - earthPos)
+        VkCommandBuffer cmd = getCurrentCommandBuffer(*g_vulkanContext);
+        if (cmd == VK_NULL_HANDLE)
+        {
+            std::cerr << "ERROR: No Vulkan command buffer available for drawing!" << "\n";
+            return;
+        }
+
+        // Compute MVP matrix
+        // Model matrix: identity (vertices are already in world space)
+        glm::mat4 modelMatrix = glm::mat4(1.0f);
+
+        // Use view and projection matrices set by main loop (via setViewProjectionMatrices)
+        // If not set, fall back to computing from camera position (for backwards compatibility)
+        glm::mat4 viewMatrix;
+        glm::mat4 projectionMatrix;
+
+        if (g_matricesSet)
+        {
+            // Use matrices set by main loop (already converted to Vulkan format)
+            viewMatrix = g_viewMatrix;
+            projectionMatrix = g_projectionMatrix;
+        }
+        else
+        {
+            // Fallback: compute from camera position (should not happen in normal operation)
+            glm::vec3 cameraTarget = position; // Look at planet center
+            glm::vec3 cameraUp = glm::vec3(0, 1, 0);
+            viewMatrix = glm::lookAt(cameraPos, cameraTarget, cameraUp);
+
+            // Compute projection matrix with Vulkan Y-axis flip
+            float aspect = static_cast<float>(g_screenWidth) / static_cast<float>(g_screenHeight);
+            float fov = g_cameraFovRadians;
+            float nearPlane = 0.1f;
+            float farPlane = 100000.0f;
+            glm::mat4 glProjection = glm::perspective(fov, aspect, nearPlane, farPlane);
+            // Flip Y-axis for Vulkan
+            glm::mat4 vulkanFlip = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
+            projectionMatrix = vulkanFlip * glProjection;
+        }
+
+        glm::mat4 mvp = projectionMatrix * viewMatrix * modelMatrix;
+
+        // Use the sunDirection passed as parameter
         glm::vec3 lightDir = sunDirection;
 
-        // Use shader
-        glUseProgram(shaderProgram_);
-
-        // Set matrices - use identity for model since we'll transform vertices
-        // directly
-        glm::mat4 identity = glm::mat4(1.0f);
-        glUniformMatrix4fv(uniformModelMatrix_, 1, GL_FALSE, glm::value_ptr(identity));
-        glUniformMatrix4fv(uniformViewMatrix_, 1, GL_FALSE, modelviewMatrix.data());
-        glUniformMatrix4fv(uniformProjectionMatrix_, 1, GL_FALSE, projectionMatrix.data());
-
-        // Set textures
-        // Unit 0: Color Texture 1
-        glActiveTexture_ptr(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, tex1);
-        glUniform1i(uniformColorTexture_, 0);
-
-        // Unit 1: Color Texture 2
-        glActiveTexture_ptr(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, tex2);
-        glUniform1i(uniformColorTexture2_, 1);
-
-        // Blend Factor
-        glUniform1f(uniformBlendFactor_, blendFactor);
-
-// Unit 2: Normal Map (only bind if enabled and loaded)
-#ifndef GL_TEXTURE2
-#define GL_TEXTURE2 0x84C2
-#endif
-
-        glActiveTexture_ptr(GL_TEXTURE2);
-        if (useNormalMap_ && elevationLoaded_ && normalMapTexture_ != 0)
+        // Update vertex shader uniform buffer (binding 2)
+        // Structure matches earth-vertex.glsl Uniforms block
+        struct VertexUniforms
         {
-            glBindTexture(GL_TEXTURE_2D, normalMapTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        if (uniformNormalMap_ >= 0)
-        {
-            glUniform1i(uniformNormalMap_, 2);
-        }
+            float uPlanetRadius;
+            int uFlatCircleMode;
+            glm::vec3 uSphereCenter;
+            float uSphereRadius;
+            glm::vec3 uCameraPos;
+            glm::vec3 uCameraDir;
+            float uCameraFOV;
+            glm::vec3 uPoleDir;
+            glm::vec3 uPrimeMeridianDir;
+            int uUseDisplacement;
+            float uDisplacementScale;
+            glm::mat4 uMVP;
+        } vertexUniforms;
 
-// Unit 12: Heightmap (landmass elevation) - used by both vertex and fragment shaders
-#ifndef GL_TEXTURE12
-#define GL_TEXTURE12 0x84CC
-#endif
-        glActiveTexture_ptr(GL_TEXTURE12);
-        if (useHeightmap_ && elevationLoaded_ && heightmapTexture_ != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, heightmapTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        if (uniformHeightmap_ >= 0)
-        {
-            glUniform1i(uniformHeightmap_, 12);
-        }
+        vertexUniforms.uPlanetRadius = displayRadius;
+        vertexUniforms.uFlatCircleMode = 0;
+        vertexUniforms.uSphereCenter = position;
+        vertexUniforms.uSphereRadius = displayRadius;
+        vertexUniforms.uCameraPos = cameraPos;
+        vertexUniforms.uCameraDir = g_cameraDirection;  // Use actual camera direction
+        vertexUniforms.uCameraFOV = g_cameraFovRadians; // Use actual camera FOV
+        vertexUniforms.uPoleDir = poleDirection;
+        vertexUniforms.uPrimeMeridianDir = primeMeridianDirection;
+        vertexUniforms.uUseDisplacement = useHeightmap_ ? 1 : 0;
+        vertexUniforms.uDisplacementScale = 1.0f;
+        vertexUniforms.uMVP = mvp; // Will be updated with actual MVP
 
-// Unit 3: Nightlights (city lights)
-#ifndef GL_TEXTURE3
-#define GL_TEXTURE3 0x84C3
-#endif
+        updateUniformBuffer(*g_vulkanContext, vertexUniformBuffer_, &vertexUniforms, sizeof(vertexUniforms));
 
-        glActiveTexture_ptr(GL_TEXTURE3);
-        if (nightlightsLoaded_ && nightlightsTexture_ != 0)
+        // Update fragment shader uniform buffer (binding 16)
+        // Structure matches earth-fragment.glsl Uniforms block
+        struct FragmentUniforms
         {
-            glBindTexture(GL_TEXTURE_2D, nightlightsTexture_);
-        }
-        else
-        {
-            // Bind a black texture (no lights) if nightlights not available
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformNightlights_, 3);
+            float uBlendFactor;
+            float uWindBlendFactor;
+            glm::vec2 uWindTextureSize;
+            float uIceBlendFactor;
+            glm::vec3 uLightDir;
+            glm::vec3 uLightColor;
+            glm::vec3 uMoonDir;
+            glm::vec3 uMoonColor;
+            glm::vec3 uAmbientColor;
+            glm::vec3 uPoleDir;
+            glm::vec3 uPrimeMeridianDir;
+            glm::vec3 uCameraPos;
+            glm::vec3 uCameraDir;
+            float uCameraFOV;
+            int uUseNormalMap;
+            int uUseHeightmap;
+            int uUseSpecular;
+            float uTime;
+            int uFlatCircleMode;
+            glm::vec3 uSphereCenter;
+            float uSphereRadius;
+            glm::vec3 uBillboardCenter;
+            int uShowWireframe;
+        } fragmentUniforms;
 
-// Unit 4: Micro noise texture (fine-grained flicker)
-#ifndef GL_TEXTURE4
-#define GL_TEXTURE4 0x84C4
-#endif
-        glActiveTexture_ptr(GL_TEXTURE4);
-        if (noiseTexturesGenerated_ && microNoiseTexture_ != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, microNoiseTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformMicroNoise_, 4);
-
-// Unit 5: Hourly noise texture (regional variation)
-#ifndef GL_TEXTURE5
-#define GL_TEXTURE5 0x84C5
-#endif
-        glActiveTexture_ptr(GL_TEXTURE5);
-        if (noiseTexturesGenerated_ && hourlyNoiseTexture_ != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, hourlyNoiseTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformHourlyNoise_, 5);
-
-        // Unit 6 & 7: Wind textures (two 2D textures for current and next month)
-        // The shader blends between them based on the current date
-#ifndef GL_TEXTURE6
-#define GL_TEXTURE6 0x84C6
-#endif
-#ifndef GL_TEXTURE7
-#define GL_TEXTURE7 0x84C7
-#endif
-        // Bind wind textures (current and next month for blending)
-        // Calculate which two months to blend between
+        // Calculate month position for texture blending
         double daysSinceJ2000 = julianDate - JD_J2000;
         double yearFraction = std::fmod(daysSinceJ2000, DAYS_PER_TROPICAL_YEAR) / DAYS_PER_TROPICAL_YEAR;
         if (yearFraction < 0)
-        {
             yearFraction += 1.0;
-        }
-
-        // Map year fraction (0.0-1.0) to month index (0-11)
-        // month 1 = index 0, month 12 = index 11
         double monthPos = yearFraction * static_cast<double>(MONTHS_PER_YEAR);
-        int currentMonthIdx = static_cast<int>(monthPos) % 12;
-        int nextMonthIdx = (currentMonthIdx + 1) % 12;
         float blendFactor = static_cast<float>(monthPos - static_cast<int>(monthPos));
 
-        // Bind current month texture (GL_TEXTURE6)
-        glActiveTexture_ptr(GL_TEXTURE6);
-        if (windTexturesLoaded_[currentMonthIdx] && windTextures_[currentMonthIdx] != 0)
+        // Calculate ice mask month indices (used for both blend factor and texture selection)
+        int iceIdx1Calc = static_cast<int>(std::floor(monthPos));
+        int iceIdx2Calc = (iceIdx1Calc + 1) % MONTHS_PER_YEAR;
+        if (iceIdx1Calc < 0)
         {
-            glBindTexture(GL_TEXTURE_2D, windTextures_[currentMonthIdx]);
-            glUniform1i(uniformWindTexture1_, 6);
+            iceIdx1Calc = (iceIdx1Calc % MONTHS_PER_YEAR + MONTHS_PER_YEAR) % MONTHS_PER_YEAR;
         }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glUniform1i(uniformWindTexture1_, 6);
-        }
+        float iceBlendFactor = static_cast<float>(monthPos - static_cast<int>(std::floor(monthPos)));
 
-        // Bind next month texture (GL_TEXTURE7)
-        glActiveTexture_ptr(GL_TEXTURE7);
-        if (windTexturesLoaded_[nextMonthIdx] && windTextures_[nextMonthIdx] != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, windTextures_[nextMonthIdx]);
-            glUniform1i(uniformWindTexture2_, 7);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-            glUniform1i(uniformWindTexture2_, 7);
-        }
+        // Store ice indices for later use in texture binding
+        int iceIdx1 = iceIdx1Calc;
+        int iceIdx2 = iceIdx2Calc;
 
-        // Set blend factor between months
-        if (uniformWindBlendFactor_ >= 0)
-        {
-            glUniform1f(uniformWindBlendFactor_, blendFactor);
-        }
+        fragmentUniforms.uBlendFactor = blendFactor;
+        fragmentUniforms.uWindBlendFactor = blendFactor;
+        fragmentUniforms.uWindTextureSize = glm::vec2(1024.0f, 512.0f);
+        fragmentUniforms.uIceBlendFactor = iceBlendFactor;
 
-        // Set wind texture resolution for UV normalization (1024x512 fixed resolution)
-        if ((windTexturesLoaded_[currentMonthIdx] || windTexturesLoaded_[nextMonthIdx]) && uniformWindTextureSize_ >= 0)
-        {
-            glUniform2f(uniformWindTextureSize_, 1024.0f, 512.0f);
-        }
+        fragmentUniforms.uLightDir = lightDir;
+        fragmentUniforms.uLightColor = glm::vec3(1.0f, 1.0f, 1.0f);   // White sunlight
+        fragmentUniforms.uAmbientColor = glm::vec3(0.0f, 0.0f, 0.0f); // No ambient - Sun is exclusive light source
 
-// Unit 8: Specular/Roughness texture (surface reflectivity) (only bind if enabled and
-// loaded)
-#ifndef GL_TEXTURE8
-#define GL_TEXTURE8 0x84C8
-#endif
-        glActiveTexture_ptr(GL_TEXTURE8);
-        if (useSpecular_ && specularLoaded_ && specularTexture_ != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, specularTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        if (uniformSpecular_ >= 0)
-        {
-            glUniform1i(uniformSpecular_, 8);
-        }
-
-        // Calculate ice mask month indices based on Julian date (same as color blending)
-        // Reuse the monthPos calculation from wind texture (already computed above)
-        // This ensures consistency across all monthly texture blending
-        int iceIdx1 = static_cast<int>(std::floor(monthPos));
-        int iceIdx2 = (iceIdx1 + 1) % MONTHS_PER_YEAR;
-        float iceBlendFactor = static_cast<float>(monthPos - iceIdx1);
-
-// Unit 14: Ice mask texture (current month) - moved to avoid conflict with landmass mask
-#ifndef GL_TEXTURE14
-#define GL_TEXTURE14 0x84CE
-#endif
-        glActiveTexture_ptr(GL_TEXTURE14);
-        if (iceMasksLoaded_[iceIdx1] && iceMaskTextures_[iceIdx1] != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, iceMaskTextures_[iceIdx1]);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformIceMask_, 14);
-
-// Unit 15: Ice mask texture (next month for blending)
-#ifndef GL_TEXTURE15
-#define GL_TEXTURE15 0x84CF
-#endif
-        glActiveTexture_ptr(GL_TEXTURE15);
-        if (iceMasksLoaded_[iceIdx2] && iceMaskTextures_[iceIdx2] != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, iceMaskTextures_[iceIdx2]);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformIceMask2_, 15);
-
-        // Ice blend factor (same as color blend factor for consistent monthly
-        // transition)
-        glUniform1f(uniformIceBlendFactor_, iceBlendFactor);
-
-// Unit 9: Landmass mask texture (for ocean detection)
-#ifndef GL_TEXTURE9
-#define GL_TEXTURE9 0x84C9
-#endif
-        glActiveTexture_ptr(GL_TEXTURE9);
-        if (landmassMaskLoaded_ && landmassMaskTexture_ != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, landmassMaskTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformLandmassMask_, 9);
-
-// Unit 10: Bathymetry depth texture (ocean floor depth)
-#ifndef GL_TEXTURE10
-#define GL_TEXTURE10 0x84CA
-#endif
-        glActiveTexture_ptr(GL_TEXTURE10);
-        if (bathymetryLoaded_ && bathymetryDepthTexture_ != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, bathymetryDepthTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformBathymetryDepth_, 10);
-
-// Unit 11: Bathymetry normal texture (ocean floor terrain)
-#ifndef GL_TEXTURE11
-#define GL_TEXTURE11 0x84CB
-#endif
-        glActiveTexture_ptr(GL_TEXTURE11);
-        if (bathymetryLoaded_ && bathymetryNormalTexture_ != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, bathymetryNormalTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformBathymetryNormal_, 11);
-
-// Unit 13: Combined normal map (landmass + bathymetry) for shadows
-// Moved to unit 13 to avoid conflict with heightmap on unit 12 (needed for vertex displacement)
-#ifndef GL_TEXTURE13
-#define GL_TEXTURE13 0x84CD
-#endif
-        glActiveTexture_ptr(GL_TEXTURE13);
-        if (combinedNormalLoaded_ && combinedNormalTexture_ != 0)
-        {
-            glBindTexture(GL_TEXTURE_2D, combinedNormalTexture_);
-        }
-        else
-        {
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        glUniform1i(uniformCombinedNormal_, 13);
-
-        // Set lighting uniforms
-        glUniform3f(uniformLightDir_, lightDir.x, lightDir.y, lightDir.z);
-        glUniform3f(uniformLightColor_, 1.0f, 1.0f, 1.0f); // White sunlight
-        glUniform3f(uniformAmbientColor_, 0.0f, 0.0f,
-                    0.0f); // No ambient - Sun is exclusive light source
-
-        // =========================================================================
         // Moonlight calculation
-        // =========================================================================
-        // Moonlight is reflected sunlight. Physical properties:
-        // - Moon's albedo: ~0.12 (reflects 12% of incident sunlight)
-        // - Full moon illuminance: ~0.1-0.25 lux (vs sun's ~100,000 lux)
-        // - For visual purposes, we use a visible but realistic ratio
-        //
-        // Moon phase affects intensity:
-        // - Full moon: sun and moon on opposite sides of Earth
-        // - New moon: sun and moon on same side (moon not visible at night)
-        // We approximate phase by dot(sunDir, moonDir):
-        //   -1 = full moon (opposite), +1 = new moon (same side)
-
         glm::vec3 moonDir = glm::normalize(moonDirection);
         float sunMoonDot = glm::dot(lightDir, moonDir);
-
-        // Moon phase factor: 0 at new moon, 1 at full moon
-        // This is simplified - real phase depends on viewing angle
-        float moonPhase = 0.5f - (0.5f * sunMoonDot);
-
-        // Moonlight intensity: base intensity * phase
-        // Using ~0.03 as base (visible but not overwhelming sun)
-        // Full moon: 0.03, half moon: 0.015, new moon: ~0
+        float moonPhase = 0.5f - (0.5f * sunMoonDot); // 0 at new moon, 1 at full moon
         float moonIntensity = 0.03f * moonPhase;
-
-        // Moonlight color: slightly warm/gray (reflected from gray lunar
-        // surface) Slight blue-shift from Earth's atmosphere at night
         glm::vec3 moonColor = glm::vec3(0.8f, 0.85f, 1.0f) * moonIntensity;
+        fragmentUniforms.uMoonDir = moonDir;
+        fragmentUniforms.uMoonColor = moonColor;
 
-        glUniform3f(uniformMoonDir_, moonDir.x, moonDir.y, moonDir.z);
-        glUniform3f(uniformMoonColor_, moonColor.r, moonColor.g, moonColor.b);
+        fragmentUniforms.uPoleDir = glm::normalize(poleDirection);
+        fragmentUniforms.uPrimeMeridianDir = glm::normalize(primeMeridianDirection);
+        fragmentUniforms.uCameraPos = cameraPos;
+        fragmentUniforms.uCameraDir = glm::vec3(0, 0, 1);  // TODO: Get from camera
+        fragmentUniforms.uCameraFOV = glm::radians(60.0f); // TODO: Get from camera
+        fragmentUniforms.uUseNormalMap = useNormalMap_ ? 1 : 0;
+        fragmentUniforms.uUseHeightmap = useHeightmap_ ? 1 : 0;
+        fragmentUniforms.uUseSpecular = useSpecular_ ? 1 : 0;
+        fragmentUniforms.uTime = static_cast<float>(std::fmod(julianDate, 1.0)); // Fractional part for animated noise
+        fragmentUniforms.uFlatCircleMode = 0;                                    // Default to normal sphere mode
+        fragmentUniforms.uSphereCenter = position;
+        fragmentUniforms.uSphereRadius = displayRadius;
+        fragmentUniforms.uBillboardCenter = position; // TODO: Calculate closest point
+        fragmentUniforms.uShowWireframe = 0;          // TODO: Get from settings
 
-        // Camera position for view direction calculations
-        glUniform3f(uniformCameraPos_, cameraPos.x, cameraPos.y, cameraPos.z);
+        updateUniformBuffer(*g_vulkanContext, fragmentUniformBuffer_, &fragmentUniforms, sizeof(fragmentUniforms));
 
-        // Camera direction and FOV for billboard imposter computation
-        if (uniformCameraDir_ >= 0)
+        // Update descriptor sets with textures
+        uint32_t currentFrame = g_vulkanContext->currentFrame;
+        VkDescriptorSet descSet = descriptorSets_[currentFrame];
+
+        // Get textures from registry
+        extern TextureRegistry *g_textureRegistry;
+        if (!g_textureRegistry)
         {
-            glm::vec3 cameraDirNorm = glm::normalize(g_cameraDirection);
-            glUniform3f(uniformCameraDir_, cameraDirNorm.x, cameraDirNorm.y, cameraDirNorm.z);
-        }
-        if (uniformCameraFOV_ >= 0)
-        {
-            glUniform1f(uniformCameraFOV_, g_cameraFovRadians);
-        }
-
-        // Pass pole direction for tangent frame calculation
-        glm::vec3 poleNorm = glm::normalize(poleDirection);
-        glUniform3f(uniformPoleDir_, poleNorm.x, poleNorm.y, poleNorm.z);
-
-        // Pass prime meridian direction for coordinate system (matching C++ UV calculation)
-        glm::vec3 primeNorm = glm::normalize(primeMeridianDirection);
-        if (uniformPrimeMeridianDir_ >= 0)
-        {
-            glUniform3f(uniformPrimeMeridianDir_, primeNorm.x, primeNorm.y, primeNorm.z);
-        }
-
-        // Pass time (Julian date fraction) for animated noise
-        // Use fractional part so noise cycles smoothly
-        float timeFrac = static_cast<float>(std::fmod(julianDate, 1.0));
-        glUniform1f(uniformTime_, timeFrac);
-
-        // Pass planet radius for WGS 84 oblateness calculation
-        if (uniformPlanetRadius_ >= 0)
-        {
-            glUniform1f(uniformPlanetRadius_, displayRadius);
+            std::cerr << "ERROR: Texture registry not available!" << "\n";
+            return;
         }
 
-        // Set displacement scale multiplier (moderate exaggeration for visibility)
-        // 10x makes mountains visible at planetary scale while maintaining reasonable proportions
-        // Mt. Everest (8848m) on Earth (6371km) = 0.00139 ratio
-        // With 10x multiplier: displacement = 0.0139 * radius (visible but not exaggerated)
-        if (uniformDisplacementScale_ >= 0)
+        // Update texture bindings in descriptor set
+        // Binding 0: uColorTexture (tex1)
+        VulkanTexture *tex1Vk = g_textureRegistry->getTexture(tex1);
+        if (tex1Vk)
         {
-            glUniform1f(uniformDisplacementScale_, 10.0f);
+            updateDescriptorSetTexture(*g_vulkanContext, descSet, 0, tex1Vk->imageView, tex1Vk->sampler);
         }
 
-        // Set flat circle mode uniforms (will be set to 0 for normal rendering, 1 for flat circle)
-        if (uniformFlatCircleMode_ >= 0)
+        // Binding 1: uColorTexture2 (tex2)
+        VulkanTexture *tex2Vk = g_textureRegistry->getTexture(tex2);
+        if (tex2Vk)
         {
-            glUniform1i(uniformFlatCircleMode_, 0); // Default to normal sphere mode
-        }
-        if (uniformSphereCenter_ >= 0)
-        {
-            glUniform3f(uniformSphereCenter_, position.x, position.y, position.z);
-        }
-        if (uniformSphereRadius_ >= 0)
-        {
-            glUniform1f(uniformSphereRadius_, displayRadius);
+            updateDescriptorSetTexture(*g_vulkanContext, descSet, 1, tex2Vk->imageView, tex2Vk->sampler);
         }
 
-        // Set toggle uniforms
-        if (uniformUseNormalMap_ >= 0)
+        // Binding 2: uNormalMap
+        if (useNormalMap_ && elevationLoaded_ && normalMapTexture_ != 0)
         {
-            glUniform1i(uniformUseNormalMap_, useNormalMap_ ? 1 : 0);
-        }
-        if (uniformUseHeightmap_ >= 0)
-        {
-            glUniform1i(uniformUseHeightmap_, useHeightmap_ ? 1 : 0);
-        }
-        if (uniformUseDisplacement_ >= 0)
-        {
-            // Enable displacement if heightmap and landmass mask are loaded
-            bool enableDisplacement = useHeightmap_ && elevationLoaded_ && landmassMaskLoaded_;
-            glUniform1i(uniformUseDisplacement_, enableDisplacement ? 1 : 0);
-        }
-        if (uniformUseSpecular_ >= 0)
-        {
-            glUniform1i(uniformUseSpecular_, useSpecular_ ? 1 : 0);
+            VulkanTexture *normalVk = g_textureRegistry->getTexture(normalMapTexture_);
+            if (normalVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext, descSet, 2, normalVk->imageView, normalVk->sampler);
+            }
         }
 
-        // Draw sphere with shader (moderate tessellation is fine with per-pixel
-        // normals)
-        // Use camera info set via setCameraInfo() for geometry culling
-        // Calculate dynamic tessellation based on camera distance
-        glm::vec3 closestPointOnSphere;
-        auto [baseSlices, baseStacks, localSlices, localStacks] =
-            calculateTessellation(position, displayRadius, g_cameraPosition, closestPointOnSphere);
-        drawTexturedSphere(position,
-                           displayRadius,
-                           poleDirection,
-                           primeMeridianDirection,
-                           baseSlices,
-                           baseStacks,
-                           localSlices,
-                           localStacks,
-                           g_cameraPosition,
-                           g_cameraDirection,
-                           g_cameraFovRadians,
-                           false,
-                           false,
-                           closestPointOnSphere, // Enable culling for normal rendering
-                           uniformFlatCircleMode_,
-                           uniformSphereCenter_,
-                           uniformSphereRadius_,
-                           uniformBillboardCenter_);
+        // Binding 3: uHeightmap (also used by vertex shader at binding 0 - conflict!)
+        // TODO: Fix shader binding conflict - vertex shader uses binding 0 for heightmap
+        // but fragment shader uses binding 3. For now, update both.
+        if (useHeightmap_ && elevationLoaded_ && heightmapTexture_ != 0)
+        {
+            VulkanTexture *heightVk = g_textureRegistry->getTexture(heightmapTexture_);
+            if (heightVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           0,
+                                           heightVk->imageView,
+                                           heightVk->sampler); // Vertex shader
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           3,
+                                           heightVk->imageView,
+                                           heightVk->sampler); // Fragment shader
+            }
+        }
 
-        // Restore state - unbind all texture units we used
-        glUseProgram(0);
-        glActiveTexture_ptr(GL_TEXTURE13);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE11);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE10);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE9);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE8);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE7);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE7);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE6);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glActiveTexture_ptr(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, 0);
+        // Binding 10: uLandmassMask (also used by vertex shader at binding 1 - conflict!)
+        if (landmassMaskLoaded_ && landmassMaskTexture_ != 0)
+        {
+            VulkanTexture *landmassVk = g_textureRegistry->getTexture(landmassMaskTexture_);
+            if (landmassVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           1,
+                                           landmassVk->imageView,
+                                           landmassVk->sampler); // Vertex shader
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           10,
+                                           landmassVk->imageView,
+                                           landmassVk->sampler); // Fragment shader
+            }
+        }
+
+        // Binding 4: uNightlights
+        if (nightlightsLoaded_ && nightlightsTexture_ != 0)
+        {
+            VulkanTexture *nightlightsVk = g_textureRegistry->getTexture(nightlightsTexture_);
+            if (nightlightsVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           4,
+                                           nightlightsVk->imageView,
+                                           nightlightsVk->sampler);
+            }
+        }
+
+        // Binding 5: uMicroNoise
+        if (noiseTexturesGenerated_ && microNoiseTexture_ != 0)
+        {
+            VulkanTexture *microNoiseVk = g_textureRegistry->getTexture(microNoiseTexture_);
+            if (microNoiseVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           5,
+                                           microNoiseVk->imageView,
+                                           microNoiseVk->sampler);
+            }
+        }
+
+        // Binding 6: uHourlyNoise
+        if (noiseTexturesGenerated_ && hourlyNoiseTexture_ != 0)
+        {
+            VulkanTexture *hourlyNoiseVk = g_textureRegistry->getTexture(hourlyNoiseTexture_);
+            if (hourlyNoiseVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           6,
+                                           hourlyNoiseVk->imageView,
+                                           hourlyNoiseVk->sampler);
+            }
+        }
+
+        // Binding 7: uSpecular
+        if (useSpecular_ && specularLoaded_ && specularTexture_ != 0)
+        {
+            VulkanTexture *specularVk = g_textureRegistry->getTexture(specularTexture_);
+            if (specularVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext, descSet, 7, specularVk->imageView, specularVk->sampler);
+            }
+        }
+
+        // Binding 8: uIceMask (current month) - iceIdx1 and iceIdx2 calculated above
+        if (iceMasksLoaded_[iceIdx1] && iceMaskTextures_[iceIdx1] != 0)
+        {
+            VulkanTexture *iceMask1Vk = g_textureRegistry->getTexture(iceMaskTextures_[iceIdx1]);
+            if (iceMask1Vk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext, descSet, 8, iceMask1Vk->imageView, iceMask1Vk->sampler);
+            }
+        }
+
+        // Binding 9: uIceMask2 (next month)
+        if (iceMasksLoaded_[iceIdx2] && iceMaskTextures_[iceIdx2] != 0)
+        {
+            VulkanTexture *iceMask2Vk = g_textureRegistry->getTexture(iceMaskTextures_[iceIdx2]);
+            if (iceMask2Vk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext, descSet, 9, iceMask2Vk->imageView, iceMask2Vk->sampler);
+            }
+        }
+
+        // Binding 11: uBathymetryDepth
+        if (bathymetryLoaded_ && bathymetryDepthTexture_ != 0)
+        {
+            VulkanTexture *bathymetryDepthVk = g_textureRegistry->getTexture(bathymetryDepthTexture_);
+            if (bathymetryDepthVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           11,
+                                           bathymetryDepthVk->imageView,
+                                           bathymetryDepthVk->sampler);
+            }
+        }
+
+        // Binding 12: uBathymetryNormal
+        if (bathymetryLoaded_ && bathymetryNormalTexture_ != 0)
+        {
+            VulkanTexture *bathymetryNormalVk = g_textureRegistry->getTexture(bathymetryNormalTexture_);
+            if (bathymetryNormalVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           12,
+                                           bathymetryNormalVk->imageView,
+                                           bathymetryNormalVk->sampler);
+            }
+        }
+
+        // Binding 13: uCombinedNormal
+        if (combinedNormalLoaded_ && combinedNormalTexture_ != 0)
+        {
+            VulkanTexture *combinedNormalVk = g_textureRegistry->getTexture(combinedNormalTexture_);
+            if (combinedNormalVk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext,
+                                           descSet,
+                                           13,
+                                           combinedNormalVk->imageView,
+                                           combinedNormalVk->sampler);
+            }
+        }
+
+        // Calculate wind texture month indices (reuse monthPos from above)
+        int currentMonthIdx = static_cast<int>(monthPos) % 12;
+        int nextMonthIdx = (currentMonthIdx + 1) % 12;
+
+        // Binding 14: uWindTexture1 (current month)
+        if (windTexturesLoaded_[currentMonthIdx] && windTextures_[currentMonthIdx] != 0)
+        {
+            VulkanTexture *wind1Vk = g_textureRegistry->getTexture(windTextures_[currentMonthIdx]);
+            if (wind1Vk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext, descSet, 14, wind1Vk->imageView, wind1Vk->sampler);
+            }
+        }
+
+        // Binding 15: uWindTexture2 (next month)
+        if (windTexturesLoaded_[nextMonthIdx] && windTextures_[nextMonthIdx] != 0)
+        {
+            VulkanTexture *wind2Vk = g_textureRegistry->getTexture(windTextures_[nextMonthIdx]);
+            if (wind2Vk)
+            {
+                updateDescriptorSetTexture(*g_vulkanContext, descSet, 15, wind2Vk->imageView, wind2Vk->sampler);
+            }
+        }
+
+        // All textures and uniforms are now set via Vulkan descriptor sets and uniform buffers
+        // The actual drawing happens in drawOctreeMesh() which records Vulkan commands
+
+        // Render using voxels directly (no mesh generation)
+        if (!meshGenerated_ || !octreeMesh_)
+        {
+            std::cerr << "ERROR: EarthMaterial::draw() - Octree not built!" << "\n";
+            std::cerr << "  meshGenerated_: " << meshGenerated_ << "\n";
+            std::cerr << "  octreeMesh_: " << (octreeMesh_ ? "valid" : "null") << "\n";
+            std::cerr << "  Voxel-based rendering is required. Cannot render without octree." << "\n";
+            std::exit(1);
+        }
+
+        // Update octree with proximity-based subdivision (dynamic LOD)
+        // Subdivide nodes near camera to increase resolution as we approach
+        // Multiple LOD levels with different radius thresholds (much larger for low base resolution):
+        // - Base: lowest resolution (outside all radii) - uses root octree nodes only
+        // - Within 50 radii: first level of subdivision (very low detail)
+        // - Within 20 radii: second level (low detail)
+        // - Within 10 radii: third level (medium detail)
+        // - Within 5 radii: fourth level (medium-high detail)
+        // - Within 2 radii: maximum detail (high detail, only when very close)
+        // Process LOD levels in chunks (one per frame) to avoid frame drops
+        const float lodRadii[] = {5.0f, 3.0f, 2.0f, 1.5f, 1.25f};
+        const int numLodLevels = sizeof(lodRadii) / sizeof(lodRadii[0]);
+
+        // Calculate distance from camera to planet center
+        float distanceToPlanet = glm::length(cameraPos - position);
+        float distanceInRadii = distanceToPlanet / displayRadius;
+
+        // Reset chunked processing if camera moved significantly
+        const float CAMERA_MOVEMENT_THRESHOLD = displayRadius * 0.1f; // 10% of radius
+        if (std::abs(distanceToPlanet - lastCameraDistance_) > CAMERA_MOVEMENT_THRESHOLD)
+        {
+            currentLodLevel_ = -1; // Reset to start processing from beginning
+            lastCameraDistance_ = distanceToPlanet;
+        }
+
+        // Only subdivide if we're reasonably close (within 5 radii)
+        // This prevents unnecessary subdivision when viewing from far away
+        if (distanceInRadii < 5.0f)
+        {
+            // Process one LOD level per frame (chunked processing)
+            // Find which LOD levels need processing
+            int firstLodNeeded = -1;
+            for (int i = 0; i < numLodLevels; ++i)
+            {
+                if (distanceInRadii < lodRadii[i])
+                {
+                    firstLodNeeded = i;
+                    break;
+                }
+            }
+
+            // Process next LOD level if needed
+            if (firstLodNeeded >= 0)
+            {
+                // Start from current level or first needed level
+                int lodToProcess = (currentLodLevel_ >= 0) ? currentLodLevel_ : firstLodNeeded;
+
+                if (lodToProcess < numLodLevels && distanceInRadii < lodRadii[lodToProcess])
+                {
+                    float maxSubdivisionDistance = displayRadius * lodRadii[lodToProcess];
+                    updateOctreeMeshForProximity(cameraPos, position, displayRadius, maxSubdivisionDistance);
+
+                    // Move to next LOD level for next frame
+                    currentLodLevel_ = lodToProcess + 1;
+                }
+                else
+                {
+                    // All needed LOD levels processed, reset
+                    currentLodLevel_ = -1;
+                }
+            }
+            else
+            {
+                // Camera too far, reset processing
+                currentLodLevel_ = -1;
+            }
+        }
+        else
+        {
+            // Camera too far, reset processing
+            currentLodLevel_ = -1;
+        }
+
+        // Use adaptive extraction distance based on camera distance
+        // When far away, use large extraction distance (low detail)
+        // When close, use small extraction distance (high detail)
+        float extractionRadius;
+        if (distanceInRadii >= 50.0f)
+        {
+            // Very far: use base octree only (no subdivision extraction)
+            extractionRadius = displayRadius * 1000.0f; // Effectively extract everything at base level
+        }
+        else if (distanceInRadii >= 20.0f)
+        {
+            // Far: low detail
+            extractionRadius = displayRadius * 50.0f;
+        }
+        else if (distanceInRadii >= 10.0f)
+        {
+            // Medium distance: medium-low detail
+            extractionRadius = displayRadius * 20.0f;
+        }
+        else if (distanceInRadii >= 5.0f)
+        {
+            // Medium-close: medium detail
+            extractionRadius = displayRadius * 10.0f;
+        }
+        else if (distanceInRadii >= 2.0f)
+        {
+            // Close: medium-high detail
+            extractionRadius = displayRadius * 5.0f;
+        }
+        else
+        {
+            // Very close: high detail
+            extractionRadius = displayRadius * 2.0f;
+        }
+
+        float maxSubdivisionDistance = extractionRadius;
+
+        // Extract mesh from octree for rendering
+        // This generates meshVertices_ and meshIndices_ from the voxel octree
+        if (octreeMesh_)
+        {
+            meshVertices_.clear();
+            meshIndices_.clear();
+            octreeMesh_->extractSurfaceMesh(cameraPos, maxSubdivisionDistance, meshVertices_, meshIndices_);
+
+            static bool debugPrinted = false;
+            if (!debugPrinted && !meshVertices_.empty())
+            {
+                std::cout << "DEBUG: Extracted mesh from octree - " << meshVertices_.size() << " vertices, "
+                          << meshIndices_.size() << " indices" << "\n";
+                debugPrinted = true;
+            }
+        }
+
+        // Render the octree mesh using Vulkan
+        // TODO: Implement ray marching shader that queries octree voxels directly
+        drawOctreeMesh(position);
     }
 }
 
@@ -806,11 +919,9 @@ void EarthMaterial::drawTexturedSphere(const glm::vec3 &position,
         numTriangles = std::max(numTriangles, FAR_TRIANGLE_COUNT_MIN);
         numTriangles = std::min(numTriangles, FAR_TRIANGLE_COUNT_MAX);
 
-        // Check if we're in wireframe mode (shaders disabled)
-        // If so, render fan geometry directly in world space like DynamicLODSphere does
+        // Render fan geometry directly in world space
         if (uniformFlatCircleMode < 0)
         {
-            // Wireframe mode: render fan geometry directly in world space
             glm::vec3 toSphereNorm = distance > 0.001f ? toSphere / distance : glm::vec3(0.0f, 0.0f, 1.0f);
             glm::vec3 closestPointOnSphere = position - toSphereNorm * radius;
 
@@ -899,26 +1010,27 @@ void EarthMaterial::drawTexturedSphere(const glm::vec3 &position,
                 glm::vec3 normal1 = dir1;
                 glm::vec3 normal2 = dir2;
 
+                // TODO: Migrate wireframe rendering to Vulkan
                 // Render triangle: center, edge1, edge2
-                glTexCoord2f(0.5f, 0.5f);
-                glNormal3f(centerNormal.x, centerNormal.y, centerNormal.z);
-                glVertex3f(closestPointOnSphere.x - position.x,
-                           closestPointOnSphere.y - position.y,
-                           closestPointOnSphere.z - position.z);
+                // glTexCoord2f(0.5f, 0.5f); // REMOVED - migrate to Vulkan vertex buffer
+                // glNormal3f(centerNormal.x, centerNormal.y, centerNormal.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(closestPointOnSphere.x - position.x,
+                //            closestPointOnSphere.y - position.y,
+                //            closestPointOnSphere.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
-                glTexCoord2f(0.5f, 0.5f);
-                glNormal3f(normal1.x, normal1.y, normal1.z);
-                glVertex3f(flatPoint1.x - position.x, flatPoint1.y - position.y, flatPoint1.z - position.z);
+                // glTexCoord2f(0.5f, 0.5f); // REMOVED - migrate to Vulkan vertex buffer
+                // glNormal3f(normal1.x, normal1.y, normal1.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(flatPoint1.x - position.x, flatPoint1.y - position.y, flatPoint1.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
-                glTexCoord2f(0.5f, 0.5f);
-                glNormal3f(normal2.x, normal2.y, normal2.z);
-                glVertex3f(flatPoint2.x - position.x, flatPoint2.y - position.y, flatPoint2.z - position.z);
+                // glTexCoord2f(0.5f, 0.5f); // REMOVED - migrate to Vulkan vertex buffer
+                // glNormal3f(normal2.x, normal2.y, normal2.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(flatPoint2.x - position.x, flatPoint2.y - position.y, flatPoint2.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
                 CountTriangles(GL_TRIANGLES, 1);
             }
 
-            glEnd();
-            glPopMatrix();
+            // glEnd(); // REMOVED - migrate to Vulkan
+            // glPopMatrix(); // REMOVED - migrate to Vulkan (matrices in uniform buffers)
 
             return;
         }
@@ -958,25 +1070,26 @@ void EarthMaterial::drawTexturedSphere(const glm::vec3 &position,
             // Vertex shader will compute actual world positions from these normalized coordinates
             // All UVs and normals are dummy values - fragment shader will recompute everything
 
+            // TODO: Migrate billboard rendering to Vulkan
             // Center point
-            glTexCoord2f(0.5f, 0.5f);
-            glNormal3f(0.0f, 0.0f, 1.0f);
-            glVertex3f(0.0f, 0.0f, 0.0f);
+            // glTexCoord2f(0.5f, 0.5f); // REMOVED - migrate to Vulkan vertex buffer
+            // glNormal3f(0.0f, 0.0f, 1.0f); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(0.0f, 0.0f, 0.0f); // REMOVED - migrate to Vulkan vertex buffer
 
             // Edge point 1
-            glTexCoord2f(0.5f, 0.5f);
-            glNormal3f(0.0f, 0.0f, 1.0f);
-            glVertex3f(x1, y1, 0.0f);
+            // glTexCoord2f(0.5f, 0.5f); // REMOVED - migrate to Vulkan vertex buffer
+            // glNormal3f(0.0f, 0.0f, 1.0f); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(x1, y1, 0.0f); // REMOVED - migrate to Vulkan vertex buffer
 
             // Edge point 2
-            glTexCoord2f(0.5f, 0.5f);
-            glNormal3f(0.0f, 0.0f, 1.0f);
-            glVertex3f(x2, y2, 0.0f);
+            // glTexCoord2f(0.5f, 0.5f); // REMOVED - migrate to Vulkan vertex buffer
+            // glNormal3f(0.0f, 0.0f, 1.0f); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(x2, y2, 0.0f); // REMOVED - migrate to Vulkan vertex buffer
 
             CountTriangles(GL_TRIANGLES, 1);
         }
 
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
 
         // Disable flat circle mode for normal rendering
         glUniform1i(uniformFlatCircleMode, 0);
@@ -1123,17 +1236,18 @@ void EarthMaterial::drawTexturedSphere(const glm::vec3 &position,
         if (!isTriangleVisible(v1, v2, v3, n1, n2, n3))
             return;
 
-        glTexCoord2f(uv1.x, uv1.y);
-        glNormal3f(n1.x, n1.y, n1.z);
-        glVertex3f(v1.x - position.x, v1.y - position.y, v1.z - position.z);
+        // TODO: Migrate triangle rendering to Vulkan
+        // glTexCoord2f(uv1.x, uv1.y); // REMOVED - migrate to Vulkan vertex buffer
+        // glNormal3f(n1.x, n1.y, n1.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(v1.x - position.x, v1.y - position.y, v1.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
-        glTexCoord2f(uv2.x, uv2.y);
-        glNormal3f(n2.x, n2.y, n2.z);
-        glVertex3f(v2.x - position.x, v2.y - position.y, v2.z - position.z);
+        // glTexCoord2f(uv2.x, uv2.y); // REMOVED - migrate to Vulkan vertex buffer
+        // glNormal3f(n2.x, n2.y, n2.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(v2.x - position.x, v2.y - position.y, v2.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
-        glTexCoord2f(uv3.x, uv3.y);
-        glNormal3f(n3.x, n3.y, n3.z);
-        glVertex3f(v3.x - position.x, v3.y - position.y, v3.z - position.z);
+        // glTexCoord2f(uv3.x, uv3.y); // REMOVED - migrate to Vulkan vertex buffer
+        // glNormal3f(n3.x, n3.y, n3.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(v3.x - position.x, v3.y - position.y, v3.z - position.z); // REMOVED - migrate to Vulkan vertex buffer
 
         verticesDrawn += 3;
         CountTriangles(GL_TRIANGLES, 3);
@@ -1355,56 +1469,190 @@ void EarthMaterial::drawTexturedSphere(const glm::vec3 &position,
                 }
             }
         }
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
     }
 
     glPopMatrix();
 }
 
-// Draw wireframe version of Earth (for wireframe overlay mode)
-void EarthMaterial::drawWireframe(const glm::vec3 &position,
-                                  float displayRadius,
-                                  const glm::vec3 &poleDirection,
-                                  const glm::vec3 &primeMeridianDirection,
-                                  double julianDate,
-                                  const glm::vec3 &cameraPos)
+// Draw octree mesh with shader (vertices in local space, transformed to world space in shader)
+void EarthMaterial::drawOctreeMesh(const glm::vec3 &position)
 {
-    // Render the same geometry as drawTexturedSphere but without shaders
-    // This allows glPolygonMode(GL_LINE) to work
-    // Shader should already be unbound by the caller, but ensure it's off
-    glUseProgram(0);
+    // Check if we have mesh data
+    if (meshVertices_.empty() || meshIndices_.empty())
+    {
+        static bool debugPrinted = false;
+        if (!debugPrinted)
+        {
+            std::cerr << "WARNING: drawOctreeMesh() - No mesh data to render!" << "\n";
+            std::cerr << "  meshVertices_.size(): " << meshVertices_.size() << "\n";
+            std::cerr << "  meshIndices_.size(): " << meshIndices_.size() << "\n";
+            std::cerr << "  The octree may not be generating mesh data (using voxels directly)." << "\n";
+            debugPrinted = true;
+        }
+        return; // No mesh to render
+    }
 
-    // CRITICAL: Ensure lighting is disabled and material properties don't affect color
+    // Get Vulkan command buffer
+    extern VulkanContext *g_vulkanContext;
+    if (!g_vulkanContext)
+    {
+        std::cerr << "ERROR: Vulkan context not available!" << "\n";
+        return;
+    }
+
+    VkCommandBuffer cmd = getCurrentCommandBuffer(*g_vulkanContext);
+    if (cmd == VK_NULL_HANDLE)
+    {
+        std::cerr << "WARNING: No Vulkan command buffer available for drawing octree mesh" << "\n";
+        return;
+    }
+
+    // Check if we have valid data
+    if (meshIndices_.empty() || graphicsPipeline_ == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    // Create or update Vulkan buffers
+    size_t vertexBufferSize = meshVertices_.size() * sizeof(EarthVoxelOctree::MeshVertex);
+    size_t indexBufferSize = meshIndices_.size() * sizeof(unsigned int);
+
+    if (!buffersCreated_ || vertexBuffer_.size < vertexBufferSize || indexBuffer_.size < indexBufferSize)
+    {
+        // Destroy old buffers if they exist
+        if (vertexBuffer_.buffer != VK_NULL_HANDLE)
+        {
+            destroyBuffer(*g_vulkanContext, vertexBuffer_);
+        }
+        if (indexBuffer_.buffer != VK_NULL_HANDLE)
+        {
+            destroyBuffer(*g_vulkanContext, indexBuffer_);
+        }
+
+        // Create new buffers with enough size (round up for dynamic updates)
+        size_t vertexSize = std::max(vertexBufferSize, size_t(1024 * 1024)); // At least 1MB
+        size_t indexSize = std::max(indexBufferSize, size_t(512 * 1024));    // At least 512KB
+
+        // Create device-local buffers (GPU-only, faster access)
+        // Use staging buffer for initial data upload
+        vertexBuffer_ = createBuffer(*g_vulkanContext,
+                                     vertexSize,
+                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                     meshVertices_.data());
+
+        indexBuffer_ = createBuffer(*g_vulkanContext,
+                                    indexSize,
+                                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                    meshIndices_.data());
+
+        buffersCreated_ = true;
+    }
+    else
+    {
+        // Update buffer data (mesh changes every frame)
+        // Use staging buffer to update device-local buffers
+        VulkanBuffer stagingVertexBuffer =
+            createBuffer(*g_vulkanContext,
+                         vertexBufferSize,
+                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         meshVertices_.data());
+
+        VulkanBuffer stagingIndexBuffer =
+            createBuffer(*g_vulkanContext,
+                         indexBufferSize,
+                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         meshIndices_.data());
+
+        // Copy from staging buffers to device-local buffers
+        copyBuffer(*g_vulkanContext, stagingVertexBuffer.buffer, vertexBuffer_.buffer, vertexBufferSize);
+        copyBuffer(*g_vulkanContext, stagingIndexBuffer.buffer, indexBuffer_.buffer, indexBufferSize);
+
+        // Cleanup staging buffers
+        destroyBuffer(*g_vulkanContext, stagingVertexBuffer);
+        destroyBuffer(*g_vulkanContext, stagingIndexBuffer);
+    }
+
+    // Bind pipeline and descriptor sets
+    uint32_t currentFrame = g_vulkanContext->currentFrame;
+    std::vector<VkDescriptorSet> sets = {descriptorSets_[currentFrame]};
+    bindPipelineAndDescriptors(cmd, graphicsPipeline_, pipelineLayout_, sets);
+
+    // Validate buffers before binding
+    if (vertexBuffer_.buffer == VK_NULL_HANDLE || indexBuffer_.buffer == VK_NULL_HANDLE)
+    {
+        std::cerr << "ERROR: drawOctreeMesh() - Buffers not created!" << "\n";
+        return;
+    }
+
+    // Bind vertex and index buffers
+    VkBuffer vertexBuffers[] = {vertexBuffer_.buffer};
+    VkDeviceSize offsets[] = {0};
+    recordBindVertexBuffers(cmd,
+                            0,
+                            std::vector<VkBuffer>(vertexBuffers, vertexBuffers + 1),
+                            std::vector<VkDeviceSize>(offsets, offsets + 1));
+    recordBindIndexBuffer(cmd, indexBuffer_.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    // Record draw command
+    recordDrawIndexed(cmd, static_cast<uint32_t>(meshIndices_.size()), 1, 0, 0, 0);
+}
+
+// Debug: Render voxel wireframes
+void EarthMaterial::drawVoxelWireframes(const glm::vec3 &position)
+{
+    if (voxelWireframeEdges_.empty())
+    {
+        return; // No wireframe data
+    }
+
+    // TODO: Migrate wireframe rendering to Vulkan
+    // Save OpenGL state
+    // glPushAttrib(GL_ENABLE_BIT | GL_LINE_BIT | GL_CURRENT_BIT); // REMOVED - migrate to Vulkan
+    // glPushMatrix(); // REMOVED - migrate to Vulkan
+
+    // Don't translate - vertices are in local space
+    // The shader is already bound and uSphereCenter is already set to position
+
+    // Set up wireframe rendering
+    glDisable(GL_TEXTURE_2D);
     glDisable(GL_LIGHTING);
-    glDisable(GL_LIGHT0);
-    glDisable(GL_COLOR_MATERIAL);
+    // TODO: Migrate wireframe rendering to Vulkan
+    // glColor3f(1.0f, 1.0f, 0.0f); // REMOVED - migrate to Vulkan uniform buffer
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
 
-    // Set material to fully emissive so color is used directly (no lighting calculation)
-    GLfloat matEmissive[] = {1.0f, 1.0f, 1.0f, 1.0f};
-    glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, matEmissive);
+    // Enable depth test for proper occlusion
+    // glEnable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state
+    // glDepthFunc(GL_LEQUAL); // REMOVED - migrate to Vulkan pipeline depth state
 
-    // Ensure color is set explicitly (will be used directly since lighting is off)
-    glColor3f(0.8f, 0.9f, 1.0f);
+    // Disable culling so we see all edges
+    // glDisable(GL_CULL_FACE); // REMOVED - migrate to Vulkan pipeline cull state
 
-    // Calculate dynamic tessellation based on camera distance
-    glm::vec3 closestPointOnSphere;
-    auto [baseSlices, baseStacks, localSlices, localStacks] =
-        calculateTessellation(position, displayRadius, cameraPos, closestPointOnSphere);
-    drawTexturedSphere(position,
-                       displayRadius,
-                       poleDirection,
-                       primeMeridianDirection,
-                       baseSlices,
-                       baseStacks,
-                       localSlices,
-                       localStacks,
-                       cameraPos,
-                       g_cameraDirection,
-                       g_cameraFovRadians,
-                       true, // Disable culling for wireframe (show all edges)
-                       false,
-                       closestPointOnSphere,
-                       -1, // No flat circle mode for wireframe
-                       -1,
-                       -1);
+    // Render wireframe lines
+    // glBegin(GL_LINES); // REMOVED - migrate to Vulkan
+    for (size_t i = 0; i < voxelWireframeEdges_.size(); i += 2)
+    {
+        if (i + 1 < voxelWireframeEdges_.size())
+        {
+            const glm::vec3 &v0 = voxelWireframeEdges_[i];
+            const glm::vec3 &v1 = voxelWireframeEdges_[i + 1];
+
+            // Transform to world space (add planet position)
+            glm::vec3 w0 = v0 + position;
+            glm::vec3 w1 = v1 + position;
+
+            // glVertex3f(w0.x, w0.y, w0.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(w1.x, w1.y, w1.z); // REMOVED - migrate to Vulkan vertex buffer
+        }
+    }
+    // glEnd(); // REMOVED - migrate to Vulkan
+
+    // Restore OpenGL state
+    // TODO: Migrate to Vulkan
+    // glPopMatrix(); // REMOVED - migrate to Vulkan
+    // glPopAttrib(); // REMOVED - migrate to Vulkan
 }

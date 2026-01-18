@@ -1,9 +1,17 @@
 #include "ui-primitives.h"
 #include "font-rendering.h"
 #include "constants.h"
+#include "helpers/vulkan.h"
+
+// Undefine Windows.h DrawText macro that conflicts with our function
+#ifdef DrawText
+#undef DrawText
+#endif
+
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 // Draw a rounded rectangle
 void DrawRoundedRect(float x, float y, float width, float height, float radius, float r, float g, float b, float a)
@@ -11,36 +19,75 @@ void DrawRoundedRect(float x, float y, float width, float height, float radius, 
     const int cornerSegments = 8;
     const float PI_VAL = static_cast<float>(PI);
 
-    glColor4f(r, g, b, a);
-    glBegin(GL_TRIANGLE_FAN);
+    // Use Vulkan vertex builder if active
+    if (g_buildingUIVertices)
+    {
+        float cx = x + width / 2;
+        float cy = y + height / 2;
 
-    float cx = x + width / 2;
-    float cy = y + height / 2;
-    glVertex2f(cx, cy);
+        // Collect perimeter vertices
+        std::vector<std::pair<float, float>> verts;
+        for (int i = 0; i <= cornerSegments; i++)
+        {
+            float angle = PI_VAL + (PI_VAL / 2) * i / cornerSegments;
+            verts.push_back({x + radius + radius * cosf(angle), y + radius + radius * sinf(angle)});
+        }
+        for (int i = 0; i <= cornerSegments; i++)
+        {
+            float angle = 3 * PI_VAL / 2 + (PI_VAL / 2) * i / cornerSegments;
+            verts.push_back({x + width - radius + radius * cosf(angle), y + radius + radius * sinf(angle)});
+        }
+        for (int i = 0; i <= cornerSegments; i++)
+        {
+            float angle = (PI_VAL / 2) * i / cornerSegments;
+            verts.push_back({x + width - radius + radius * cosf(angle), y + height - radius + radius * sinf(angle)});
+        }
+        for (int i = 0; i <= cornerSegments; i++)
+        {
+            float angle = PI_VAL / 2 + (PI_VAL / 2) * i / cornerSegments;
+            verts.push_back({x + radius + radius * cosf(angle), y + height - radius + radius * sinf(angle)});
+        }
 
-    for (int i = 0; i <= cornerSegments; i++)
-    {
-        float angle = PI_VAL + (PI_VAL / 2) * i / cornerSegments;
-        glVertex2f(x + radius + radius * cos(angle), y + radius + radius * sin(angle));
+        // Convert fan to triangles
+        for (size_t i = 0; i < verts.size(); i++)
+        {
+            size_t next = (i + 1) % verts.size();
+            AddUIVertex(cx, cy, r, g, b, a);
+            AddUIVertex(verts[i].first, verts[i].second, r, g, b, a);
+            AddUIVertex(verts[next].first, verts[next].second, r, g, b, a);
+        }
     }
-    for (int i = 0; i <= cornerSegments; i++)
+    else
     {
-        float angle = 3 * PI_VAL / 2 + (PI_VAL / 2) * i / cornerSegments;
-        glVertex2f(x + width - radius + radius * cos(angle), y + radius + radius * sin(angle));
+        // Fallback to OpenGL
+        glColor4f(r, g, b, a);
+        glBegin(GL_TRIANGLE_FAN);
+        float cx = x + width / 2;
+        float cy = y + height / 2;
+        glVertex2f(cx, cy);
+        for (int i = 0; i <= cornerSegments; i++)
+        {
+            float angle = PI_VAL + (PI_VAL / 2) * i / cornerSegments;
+            glVertex2f(x + radius + radius * cos(angle), y + radius + radius * sin(angle));
+        }
+        for (int i = 0; i <= cornerSegments; i++)
+        {
+            float angle = 3 * PI_VAL / 2 + (PI_VAL / 2) * i / cornerSegments;
+            glVertex2f(x + width - radius + radius * cos(angle), y + radius + radius * sin(angle));
+        }
+        for (int i = 0; i <= cornerSegments; i++)
+        {
+            float angle = (PI_VAL / 2) * i / cornerSegments;
+            glVertex2f(x + width - radius + radius * cos(angle), y + height - radius + radius * sin(angle));
+        }
+        for (int i = 0; i <= cornerSegments; i++)
+        {
+            float angle = PI_VAL / 2 + (PI_VAL / 2) * i / cornerSegments;
+            glVertex2f(x + radius + radius * cos(angle), y + height - radius + radius * sin(angle));
+        }
+        glVertex2f(x + radius + radius * cos(PI_VAL), y + radius + radius * sin(PI_VAL));
+        glEnd();
     }
-    for (int i = 0; i <= cornerSegments; i++)
-    {
-        float angle = 0 + (PI_VAL / 2) * i / cornerSegments;
-        glVertex2f(x + width - radius + radius * cos(angle), y + height - radius + radius * sin(angle));
-    }
-    for (int i = 0; i <= cornerSegments; i++)
-    {
-        float angle = PI_VAL / 2 + (PI_VAL / 2) * i / cornerSegments;
-        glVertex2f(x + radius + radius * cos(angle), y + height - radius + radius * sin(angle));
-    }
-    glVertex2f(x + radius + radius * cos(PI_VAL), y + radius + radius * sin(PI_VAL));
-
-    glEnd();
 }
 
 // Draw tooltip

@@ -11,7 +11,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "") # works
 include(FetchContent)
 
 find_package(glfw3 CONFIG REQUIRED)
-find_package(OpenGL REQUIRED)
+find_package(Vulkan REQUIRED)
+find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(TIFF REQUIRED)
 find_package(GDAL CONFIG REQUIRED)
@@ -181,28 +182,38 @@ add_custom_command(
 add_executable(vnt
     entrypoint.cpp
     concerns/constants.cpp
-    concerns/camera-controller.cpp
+    concerns/helpers/gl.cpp
+    concerns/helpers/vulkan.cpp
+    # concerns/helpers/sphere-renderer.cpp
+    # concerns/camera-controller.cpp
     concerns/stars-dynamic-skybox.cpp
     concerns/preprocessing/skybox-textures.cpp
     concerns/ui-overlay.cpp
     concerns/ui-icons.cpp
     concerns/ui-primitives.cpp
     concerns/ui-controls.cpp
+    concerns/ui-tree.cpp
     concerns/font-rendering.cpp
+    concerns/vulkan-renderer.cpp
+    concerns/screen-renderer.cpp
+    concerns/preprocess-data.cpp
     concerns/spice-ephemeris.cpp
-    concerns/gravity-grid.cpp
+    # concerns/gravity-grid.cpp
     concerns/settings.cpp
-    concerns/solar-lighting.cpp
-    concerns/fxaa.cpp
-    concerns/atmosphere-renderer.cpp
-    types/celestial-body.cpp
-    types/dynamic-lod-sphere.cpp
-    types/lagrange-point.cpp
-    types/magnetic-field.cpp
+    concerns/app-state.cpp
+    concerns/input-controller.cpp
+    # concerns/solar-lighting.cpp
+    # concerns/fxaa.cpp
+    # concerns/atmosphere-renderer.cpp
+    # types/celestial-body.cpp
+    # types/dynamic-lod-sphere.cpp
+    # types/lagrange-point.cpp
+    # types/magnetic-field.cpp
     # Earth Material Implementation
     materials/earth/setup.cpp
-    materials/earth/draw.cpp
-    materials/earth/initialization/earth-surface.cpp
+    # materials/earth/draw.cpp
+    # materials/earth/initialization/earth-surface.cpp
+    # materials/earth/initialization/earth-octree-mesh.cpp
     materials/earth/preprocessing/color-from-blue-marble.cpp
     materials/earth/preprocessing/normal-and-height-from-elevation.cpp
     materials/earth/preprocessing/specular-from-modis-reflectance.cpp
@@ -213,12 +224,12 @@ add_executable(vnt
     materials/earth/masks/landmass-from-color.cpp
     materials/earth/economy/earth-economy.cpp
     materials/earth/economy/economy-renderer-setup.cpp
-    materials/earth/economy/economy-renderer-draw.cpp
+    # materials/earth/economy/economy-renderer-draw.cpp
     materials/earth/helpers/coordinate-conversion.cpp
+    # materials/earth/voxel-octree.cpp
     ${PROTO_SRCS}
     ${PROTO_HDRS}
     # Helper modules
-    materials/helpers/gl.cpp
     materials/helpers/noise.cpp
     materials/helpers/julian.cpp
 )
@@ -239,8 +250,24 @@ endif()
 
 # Link libraries
 # miniz::miniz target automatically sets up include directories
-target_link_libraries(vnt PRIVATE glfw OpenGL::GL glm::glm ${CSPICE_TARGET} TIFF::TIFF GDAL::GDAL protobuf::libprotobuf miniz::miniz)
+target_link_libraries(vnt PRIVATE glfw Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator glm::glm ${CSPICE_TARGET} TIFF::TIFF GDAL::GDAL protobuf::libprotobuf miniz::miniz)
+
+# Workaround for MSVC runtime library mismatch with shaderc
+# The missing symbols are from optimized stdlib implementations
+# This ensures we link against the correct C++ standard library
+if(MSVC)
+    # Link against the C++ standard library runtime
+    # These symbols are provided by the MSVC runtime library
+    target_link_libraries(vnt PRIVATE
+        "$<$<CONFIG:Debug>:msvcprtd.lib>"
+        "$<$<CONFIG:Release>:msvcprt.lib>"
+        "$<$<CONFIG:RelWithDebInfo>:msvcprt.lib>"
+        "$<$<CONFIG:MinSizeRel>:msvcprt.lib>"
+    )
+endif()
+target_compile_definitions(vnt PRIVATE HAS_VULKAN)
 target_compile_definitions(vnt PRIVATE HAS_CSPICE HAS_PROTOBUF)
+# Note: HAS_EARTH_SURFACE is defined when earth-surface.cpp is enabled
 target_include_directories(vnt PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 # Link SuperNOVAS if available
@@ -250,8 +277,15 @@ if(HAS_SUPERNOVAS)
 endif()
 
 # Suppress LIBCMT conflict warning (CSPICE uses static CRT)
+# Suppress linker warnings about OpenGL function imports (we're overriding Windows OpenGL functions)
 if(MSVC)
+    # Ensure we use the dynamic runtime library to match vcpkg libraries
+    set_property(TARGET vnt PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
     target_link_options(vnt PRIVATE /NODEFAULTLIB:LIBCMT)
+    target_link_options(vnt PRIVATE /ignore:4217 /ignore:4286)
+    # Note: Not linking OpenGL32.lib - we're using our own stubs
+    # UI rendering will need an OpenGL context or migration to Vulkan
 endif()
 
 # Link json5-parser if found

@@ -1,6 +1,8 @@
 {
   "dependencies": [
     "glfw3",
+    "vulkan",
+    "vulkan-memory-allocator",
     "glm",
     "supernovas",
     "cspice",

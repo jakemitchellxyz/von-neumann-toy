@@ -1,5 +1,12 @@
 #pragma once
 
+// Prevent Windows min/max macros from conflicting with std::min/std::max
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #include <string>
 #include <vector>
 
@@ -147,6 +154,12 @@ extern const double KARMAN_LINE_KM;           // Kármán line: boundary of spac
 extern const double SCATTERING_ATMOSPHERE_KM; // Optically significant atmosphere height (same as Kármán line, 100 km)
 
 // ==================================
+// Window Size Constants
+// ==================================
+constexpr int DEFAULT_WINDOW_WIDTH = 1280; // Default window width in pixels
+constexpr int DEFAULT_WINDOW_HEIGHT = 720; // Default window height in pixels
+
+// ==================================
 // Sphere Rendering Constants
 // ==================================
 constexpr int SPHERE_BASE_SLICES = 32; // Base number of longitude divisions (slices) for sphere tessellation
@@ -169,24 +182,29 @@ extern const float MIN_DISPLAY_RADIUS;
 extern const float SKYBOX_RADIUS;
 
 // ==================================
-// Render Settings (mutable at runtime)
+// Render Settings (DEPRECATED - Use AppState::instance().uiState instead)
 // ==================================
-extern bool g_showOrbits;               // Show/hide orbital paths
-extern bool g_showRotationAxes;         // Show/hide rotation axes and equators
-extern bool g_showBarycenters;          // Show/hide barycenter markers
-extern bool g_showLagrangePoints;       // Show/hide Lagrange points
-extern bool g_showCoordinateGrids;      // Show/hide planet coordinate grids
-extern bool g_showMagneticFields;       // Show/hide magnetic field lines
-extern bool g_showGravityGrid;          // Show/hide gravity spacetime grid
-extern bool g_showForceVectors;         // Show/hide gravity and momentum force vectors
-extern bool g_showSunSpot;              // Show/hide sun spot visualization (circle + cross at overhead position)
-extern int g_gravityGridResolution;     // Grid lines per axis (10-50)
-extern float g_gravityWarpStrength;     // Warp strength multiplier (0.1-5.0)
-extern bool g_showConstellations;       // Show/hide constellation stars
-extern bool g_showCelestialGrid;        // Show/hide celestial grid overlay
-extern bool g_showConstellationFigures; // Show/hide constellation figure lines
-extern bool g_showConstellationBounds;  // Show/hide constellation boundary lines
-extern bool g_showWireframe;            // Show/hide wireframe mode (triangle edges)
+// These globals are kept for backward compatibility with commented-out code
+// New code should use AppState::instance().uiState directly
+// TODO: Remove these when all code is migrated to AppState
+extern bool g_showOrbits;               // DEPRECATED: Use APP_STATE.uiState.showOrbits
+extern bool g_showRotationAxes;         // DEPRECATED: Use APP_STATE.uiState.showRotationAxes
+extern bool g_showBarycenters;          // DEPRECATED: Use APP_STATE.uiState.showBarycenters
+extern bool g_showLagrangePoints;       // DEPRECATED: Use APP_STATE.uiState.showLagrangePoints
+extern bool g_showCoordinateGrids;      // DEPRECATED: Use APP_STATE.uiState.showCoordinateGrids
+extern bool g_showMagneticFields;       // DEPRECATED: Use APP_STATE.uiState.showMagneticFields
+extern bool g_showGravityGrid;          // DEPRECATED: Use APP_STATE.uiState.showGravityGrid
+extern bool g_showForceVectors;         // DEPRECATED: Use APP_STATE.uiState.showForceVectors
+extern bool g_showSunSpot;              // DEPRECATED: Use APP_STATE.uiState.showSunSpot
+extern int g_gravityGridResolution;     // DEPRECATED: Use APP_STATE.uiState.gravityGridResolution
+extern float g_gravityWarpStrength;     // DEPRECATED: Use APP_STATE.uiState.gravityWarpStrength
+extern bool g_showConstellations;       // DEPRECATED: Use APP_STATE.uiState.showConstellations
+extern bool g_showCelestialGrid;        // DEPRECATED: Use APP_STATE.uiState.showCelestialGrid
+extern bool g_showConstellationFigures; // DEPRECATED: Use APP_STATE.uiState.showConstellationFigures
+extern bool g_showConstellationBounds;  // DEPRECATED: Use APP_STATE.uiState.showConstellationBounds
+extern bool g_showWireframe;            // DEPRECATED: Use APP_STATE.uiState.showWireframe
+extern bool g_showVoxelWireframes;      // DEPRECATED: Use APP_STATE.uiState.showVoxelWireframes
+extern bool g_showAtmosphereLayers;     // DEPRECATED: Use APP_STATE.uiState.showAtmosphereLayers
 
 // ==================================
 // Helper Functions

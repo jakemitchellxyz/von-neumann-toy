@@ -34,39 +34,42 @@ struct UIInteraction
     CelestialBody *clickedMoon;       // Moon clicked in details panel (nullptr if none) - triggers focus
     CelestialBody
         *focusOnOrbitingBody; // Orbiting body button clicked (Sun for planets, parent for moons) - triggers focus
-    bool contextMenuGhostingClicked; // True if "Toggle Trail" was clicked in context menu
-    bool contextMenuShouldClose;     // True if context menu should be closed
-    bool pauseToggled;               // True if pause/resume button was clicked
-    bool orbitsToggled;              // True if orbit visibility was toggled
-    bool axesToggled;                // True if rotation axes visibility was toggled
-    bool barycentersToggled;         // True if barycenter visibility was toggled
-    bool lagrangePointsToggled;      // True if Lagrange points visibility was toggled
-    bool coordGridsToggled;          // True if coordinate grids visibility was toggled
-    bool magneticFieldsToggled;      // True if magnetic fields visibility was toggled
-    bool gravityGridToggled;         // True if gravity grid visibility was toggled
-    bool constellationsToggled;      // True if constellations visibility was toggled
-    bool constellationGridToggled;   // True if celestial grid visibility was toggled
+    bool contextMenuGhostingClicked;  // True if "Toggle Trail" was clicked in context menu
+    bool contextMenuShouldClose;      // True if context menu should be closed
+    bool pauseToggled;                // True if pause/resume button was clicked
+    bool orbitsToggled;               // True if orbit visibility was toggled
+    bool axesToggled;                 // True if rotation axes visibility was toggled
+    bool barycentersToggled;          // True if barycenter visibility was toggled
+    bool lagrangePointsToggled;       // True if Lagrange points visibility was toggled
+    bool coordGridsToggled;           // True if coordinate grids visibility was toggled
+    bool magneticFieldsToggled;       // True if magnetic fields visibility was toggled
+    bool gravityGridToggled;          // True if gravity grid visibility was toggled
+    bool constellationsToggled;       // True if constellations visibility was toggled
+    bool constellationGridToggled;    // True if celestial grid visibility was toggled
     bool constellationFiguresToggled; // True if constellation figures visibility was toggled
     bool constellationBoundsToggled;  // True if constellation bounds visibility was toggled
-    bool forceVectorsToggled;        // True if force vectors visibility was toggled
-    bool sunSpotToggled;             // True if sun spot visibility was toggled
-    bool wireframeToggled;           // True if wireframe mode was toggled
+    bool forceVectorsToggled;         // True if force vectors visibility was toggled
+    bool sunSpotToggled;              // True if sun spot visibility was toggled
+    bool wireframeToggled;            // True if wireframe mode was toggled
+    bool voxelWireframeToggled;       // True if voxel wireframes visibility was toggled
+    bool atmosphereLayersToggled;     // True if atmosphere layers visibility was toggled
     bool fxaaToggled;                 // True if FXAA antialiasing was toggled
     bool vsyncToggled;                // True if VSync was toggled
-    bool citiesToggled;              // True if cities visibility was toggled
-    bool heightmapToggled;           // True if heightmap effect was toggled
-    bool normalMapToggled;           // True if normal map was toggled
-    bool roughnessToggled;           // True if roughness/specular effect was toggled
-    int newGravityGridResolution;    // New grid resolution (-1 if unchanged)
-    float newGravityWarpStrength;    // New warp strength (-1 if unchanged)
-    float newFOV;                    // New FOV value from slider (-1 if unchanged)
-    bool uiConsumedClick;            // True if the UI handled this click (don't clear focus)
-    bool uiSliderDragging;           // True if any UI slider is being dragged (block camera input)
-    bool fullscreenToggled;          // True if fullscreen button was clicked
-    int newTextureResolution;        // New texture resolution (0-3 for Low/Medium/High/Ultra, -1 if unchanged)
-    bool followModeToggled;          // True if follow mode toggle was clicked in context menu
-    bool surfaceViewToggled;         // True if surface view toggle was clicked in context menu
-    bool uiHideToggled;              // True if hide UI button was clicked
+    bool citiesToggled;               // True if cities visibility was toggled
+    bool heightmapToggled;            // True if heightmap effect was toggled
+    bool normalMapToggled;            // True if normal map was toggled
+    bool roughnessToggled;            // True if roughness/specular effect was toggled
+    int newGravityGridResolution;     // New grid resolution (-1 if unchanged)
+    float newGravityWarpStrength;     // New warp strength (-1 if unchanged)
+    float newFOV;                     // New FOV value from slider (-1 if unchanged)
+    bool uiConsumedClick;             // True if the UI handled this click (don't clear focus)
+    bool uiSliderDragging;            // True if any UI slider is being dragged (block camera input)
+    bool fovSliderDragging;           // True if FOV slider is being dragged
+    bool fullscreenToggled;           // True if fullscreen button was clicked
+    int newTextureResolution;         // New texture resolution (0-3 for Low/Medium/High/Ultra, -1 if unchanged)
+    bool followModeToggled;           // True if follow mode toggle was clicked in context menu
+    bool surfaceViewToggled;          // True if surface view toggle was clicked in context menu
+    bool uiHideToggled;               // True if hide UI button was clicked
 };
 
 // ==================================
@@ -107,6 +110,8 @@ struct TimeControlParams
     bool showForceVectors;               // Current force vectors visibility state
     bool showSunSpot;                    // Current sun spot visibility state
     bool showWireframe;                  // Current wireframe mode state
+    bool showVoxelWireframes;            // Current voxel wireframes visibility state
+    bool showAtmosphereLayers;           // Current atmosphere layers visibility state
     bool fxaaEnabled;                    // Current FXAA antialiasing state
     bool vsyncEnabled;                   // Current VSync state
     int gravityGridResolution;           // Current grid resolution (lines per axis)
@@ -156,13 +161,13 @@ struct MeasurementResult
     double longitude;       // Longitude in radians (if body has coordinate system)
     float elevation;        // Elevation in meters (if body has heightmap)
     // Color picker fields
-    bool hasColor;          // Whether color was successfully read
-    float colorR;           // Red component (0.0-1.0)
-    float colorG;           // Green component (0.0-1.0)
-    float colorB;           // Blue component (0.0-1.0)
-    int colorRInt;          // Red component (0-255)
-    int colorGInt;          // Green component (0-255)
-    int colorBInt;          // Blue component (0-255)
+    bool hasColor; // Whether color was successfully read
+    float colorR;  // Red component (0.0-1.0)
+    float colorG;  // Green component (0.0-1.0)
+    float colorB;  // Blue component (0.0-1.0)
+    int colorRInt; // Red component (0-255)
+    int colorGInt; // Green component (0-255)
+    int colorBInt; // Blue component (0-255)
 };
 
 // ==================================
@@ -290,6 +295,9 @@ void UpdateMeasurementResult(const glm::vec3 &cameraPos,
 // ==================================
 // Lower-level Drawing Functions
 // ==================================
+
+// Set OpenGL context window for UI rendering (called by screen-renderer)
+void SetOpenGLContextWindow(GLFWwindow *window);
 
 // Begin 2D UI rendering mode
 void BeginUI(int screenWidth, int screenHeight);

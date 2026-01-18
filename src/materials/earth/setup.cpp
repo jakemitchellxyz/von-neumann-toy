@@ -8,7 +8,8 @@
 // Also processes ETOPO elevation data to generate heightmap and normal map
 // textures for bump/displacement mapping.
 
-#include "../helpers/gl.h"
+#include "../../concerns/helpers/gl.h"
+#include "../../concerns/helpers/vulkan.h"
 #include "earth-material.h"
 
 #include <cstdlib> // For std::exit
@@ -34,7 +35,6 @@
 #include <gdal_utils.h>
 
 
-
 // Global instance
 // Cannot be const because it's initialized and modified at runtime
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
@@ -53,22 +53,21 @@ EarthMaterial::EarthMaterial()
     : initialized_(false), fallbackTexture_(0), heightmapTexture_(0), normalMapTexture_(0), elevationLoaded_(false),
       specularTexture_(0), specularLoaded_(false), iceMaskTextures_{}, iceMasksLoaded_{}, landmassMaskTexture_(0),
       landmassMaskLoaded_(false), bathymetryDepthTexture_(0), bathymetryNormalTexture_(0), bathymetryLoaded_(false),
-      combinedNormalTexture_(0), combinedNormalLoaded_(false),
-      nightlightsTexture_(0), nightlightsLoaded_(false),
-      windTextures_{}, windTexturesLoaded_{},
-      shaderProgram_(0), shaderAvailable_(false), uniformModelMatrix_(-1), uniformViewMatrix_(-1),
-      uniformProjectionMatrix_(-1), uniformColorTexture_(-1), uniformColorTexture2_(-1), uniformBlendFactor_(-1),
-      uniformNormalMap_(-1), uniformHeightmap_(-1), uniformLightDir_(-1), uniformLightColor_(-1), uniformMoonDir_(-1),
-      uniformMoonColor_(-1), uniformAmbientColor_(-1), uniformPoleDir_(-1), uniformUseNormalMap_(-1),
-      uniformUseHeightmap_(-1), uniformUseDisplacement_(-1), uniformUseSpecular_(-1), uniformNightlights_(-1), uniformTime_(-1),
-      uniformMicroNoise_(-1), uniformHourlyNoise_(-1), uniformSpecular_(-1), uniformIceMask_(-1), uniformIceMask2_(-1),
-      uniformIceBlendFactor_(-1), uniformLandmassMask_(-1), uniformCameraPos_(-1), uniformCameraDir_(-1), uniformCameraFOV_(-1), uniformPrimeMeridianDir_(-1), uniformBathymetryDepth_(-1),
-      uniformBathymetryNormal_(-1), uniformCombinedNormal_(-1),
-      uniformPlanetRadius_(-1), uniformFlatCircleMode_(-1), uniformSphereCenter_(-1), uniformSphereRadius_(-1), uniformBillboardCenter_(-1),
-      uniformDisplacementScale_(-1),
-      uniformWindTexture1_(-1), uniformWindTexture2_(-1), uniformWindBlendFactor_(-1), uniformWindTextureSize_(-1),
-      microNoiseTexture_(0), hourlyNoiseTexture_(0), noiseTexturesGenerated_(false),
-      monthlyTextures_{}, textureLoaded_{}
+      combinedNormalTexture_(0), combinedNormalLoaded_(false), nightlightsTexture_(0), nightlightsLoaded_(false),
+      windTextures_{}, windTexturesLoaded_{}, shaderProgram_(0), shaderAvailable_(false), uniformModelMatrix_(-1),
+      uniformViewMatrix_(-1), uniformProjectionMatrix_(-1), uniformColorTexture_(-1), uniformColorTexture2_(-1),
+      uniformBlendFactor_(-1), uniformNormalMap_(-1), uniformHeightmap_(-1), uniformLightDir_(-1),
+      uniformLightColor_(-1), uniformMoonDir_(-1), uniformMoonColor_(-1), uniformAmbientColor_(-1), uniformPoleDir_(-1),
+      uniformUseNormalMap_(-1), uniformUseHeightmap_(-1), uniformUseDisplacement_(-1), uniformUseSpecular_(-1),
+      uniformNightlights_(-1), uniformTime_(-1), uniformMicroNoise_(-1), uniformHourlyNoise_(-1), uniformSpecular_(-1),
+      uniformIceMask_(-1), uniformIceMask2_(-1), uniformIceBlendFactor_(-1), uniformLandmassMask_(-1),
+      uniformCameraPos_(-1), uniformCameraDir_(-1), uniformCameraFOV_(-1), uniformPrimeMeridianDir_(-1),
+      uniformBathymetryDepth_(-1), uniformBathymetryNormal_(-1), uniformCombinedNormal_(-1), uniformPlanetRadius_(-1),
+      uniformFlatCircleMode_(-1), uniformSphereCenter_(-1), uniformSphereRadius_(-1), uniformBillboardCenter_(-1),
+      uniformDisplacementScale_(-1), uniformShowWireframe_(-1), uniformWindTexture1_(-1), uniformWindTexture2_(-1),
+      uniformWindBlendFactor_(-1), uniformWindTextureSize_(-1), microNoiseTexture_(0), hourlyNoiseTexture_(0),
+      noiseTexturesGenerated_(false), monthlyTextures_{}, textureLoaded_{}, meshGenerated_(false), meshVAO_(0),
+      meshVBO_(0), meshEBO_(0), meshVAOCreated_(false)
 {
     monthlyTextures_.fill(0);
     textureLoaded_.fill(false);
@@ -84,6 +83,17 @@ EarthMaterial::~EarthMaterial()
 // ============================================================================
 // Shader Initialization
 // ============================================================================
+
+// Stub implementation when earth-surface.cpp is not linked
+// This allows setup.cpp to be used for STB implementations without requiring earth-surface
+// The real implementation is in earth-surface.cpp and will override this stub when linked
+bool EarthMaterial::initializeSurfaceShader()
+{
+    // Stub: surface shader initialization not available when earth-surface.cpp is not linked
+    // Return false to indicate shader is not initialized
+    // This is a weak implementation - earth-surface.cpp provides the real one when enabled
+    return false;
+}
 
 bool EarthMaterial::initializeShaders()
 {
@@ -104,6 +114,7 @@ bool EarthMaterial::initializeShaders()
     }
 
     // Initialize surface shader (earth-vertex.glsl + earth-fragment.glsl)
+    // Only attempt if earth-surface.cpp is linked (provides real implementation)
     if (!shaderAvailable_ && !initializeSurfaceShader())
     {
         return false;
@@ -130,29 +141,28 @@ void EarthMaterial::cleanup()
 
     if (fallbackTexture_ != 0)
     {
-        glDeleteTextures(1, &fallbackTexture_);
+        // glDeleteTextures(1, &fallbackTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         fallbackTexture_ = 0;
     }
 
     if (heightmapTexture_ != 0)
     {
-        glDeleteTextures(1, &heightmapTexture_);
+        // glDeleteTextures(1, &heightmapTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         heightmapTexture_ = 0;
     }
 
     if (normalMapTexture_ != 0)
     {
-        glDeleteTextures(1, &normalMapTexture_);
+        // glDeleteTextures(1, &normalMapTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         normalMapTexture_ = 0;
     }
 
     if (specularTexture_ != 0)
     {
-        glDeleteTextures(1, &specularTexture_);
+        // glDeleteTextures(1, &specularTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         specularTexture_ = 0;
         specularLoaded_ = false;
     }
-
 
 
     // Delete ice mask textures
@@ -169,7 +179,7 @@ void EarthMaterial::cleanup()
     // Delete landmass mask texture
     if (landmassMaskTexture_ != 0)
     {
-        glDeleteTextures(1, &landmassMaskTexture_);
+        // glDeleteTextures(1, &landmassMaskTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         landmassMaskTexture_ = 0;
         landmassMaskLoaded_ = false;
     }
@@ -177,12 +187,12 @@ void EarthMaterial::cleanup()
     // Delete bathymetry textures
     if (bathymetryDepthTexture_ != 0)
     {
-        glDeleteTextures(1, &bathymetryDepthTexture_);
+        // glDeleteTextures(1, &bathymetryDepthTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         bathymetryDepthTexture_ = 0;
     }
     if (bathymetryNormalTexture_ != 0)
     {
-        glDeleteTextures(1, &bathymetryNormalTexture_);
+        // glDeleteTextures(1, &bathymetryNormalTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         bathymetryNormalTexture_ = 0;
     }
     bathymetryLoaded_ = false;
@@ -196,7 +206,7 @@ void EarthMaterial::cleanup()
 
     if (nightlightsTexture_ != 0)
     {
-        glDeleteTextures(1, &nightlightsTexture_);
+        // glDeleteTextures(1, &nightlightsTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         nightlightsTexture_ = 0;
         nightlightsLoaded_ = false;
     }
@@ -207,13 +217,13 @@ void EarthMaterial::cleanup()
     // Cleanup noise textures
     if (microNoiseTexture_ != 0)
     {
-        glDeleteTextures(1, &microNoiseTexture_);
+        // glDeleteTextures(1, &microNoiseTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         microNoiseTexture_ = 0;
     }
 
     if (hourlyNoiseTexture_ != 0)
     {
-        glDeleteTextures(1, &hourlyNoiseTexture_);
+        // glDeleteTextures(1, &hourlyNoiseTexture_); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         hourlyNoiseTexture_ = 0;
     }
     noiseTexturesGenerated_ = false;
@@ -226,6 +236,98 @@ void EarthMaterial::cleanup()
     }
     shaderAvailable_ = false;
 
+    // Cleanup Vulkan buffers
+    extern VulkanContext *g_vulkanContext;
+    if (g_vulkanContext)
+    {
+        std::cerr << "Cleaning up EarthMaterial Vulkan buffers..." << std::endl;
+        if (vertexBuffer_.buffer != VK_NULL_HANDLE || vertexBuffer_.allocation != VK_NULL_HANDLE)
+        {
+            destroyBuffer(*g_vulkanContext, vertexBuffer_);
+        }
+        if (indexBuffer_.buffer != VK_NULL_HANDLE || indexBuffer_.allocation != VK_NULL_HANDLE)
+        {
+            destroyBuffer(*g_vulkanContext, indexBuffer_);
+        }
+        if (vertexUniformBuffer_.buffer != VK_NULL_HANDLE || vertexUniformBuffer_.allocation != VK_NULL_HANDLE)
+        {
+            destroyBuffer(*g_vulkanContext, vertexUniformBuffer_);
+        }
+        if (fragmentUniformBuffer_.buffer != VK_NULL_HANDLE || fragmentUniformBuffer_.allocation != VK_NULL_HANDLE)
+        {
+            destroyBuffer(*g_vulkanContext, fragmentUniformBuffer_);
+        }
+    }
+
     elevationLoaded_ = false;
     initialized_ = false;
+}
+
+GLuint EarthMaterial::compileShader(GLenum type, const char *source)
+{
+    if (glCreateShader == nullptr)
+    {
+        std::cerr << "Failed to load OpenGL shader extensions" << '\n';
+        return 0;
+    }
+
+    GLuint shader = glCreateShader(type);
+    if (shader == 0)
+    {
+        std::cerr << "Failed to create shader" << '\n';
+        return 0;
+    }
+
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+
+    GLint success = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (success == 0)
+    {
+        GLint logLength = 0;
+        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLength);
+        std::vector<char> log(logLength);
+        glGetShaderInfoLog(shader, logLength, nullptr, log.data());
+        std::cerr << "Shader compilation failed:\n" << log.data() << '\n';
+        glDeleteShader(shader);
+        return 0;
+    }
+
+    return shader;
+}
+
+GLuint EarthMaterial::linkProgram(GLuint vertexShader, GLuint fragmentShader)
+{
+    if (glCreateProgram == nullptr)
+    {
+        std::cerr << "Failed to load OpenGL shader extensions" << '\n';
+        return 0;
+    }
+
+    GLuint program = glCreateProgram();
+    if (program == 0)
+    {
+        std::cerr << "Failed to create shader program" << '\n';
+        return 0;
+    }
+
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
+
+    GLint success = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &success);
+    if (success == 0)
+    {
+        GLint logLength = 0;
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logLength);
+        std::vector<char> log(logLength);
+        glGetProgramInfoLog(program, logLength, nullptr, log.data());
+        std::cerr << "Shader linking failed:\n" << log.data() << '\n';
+        glDeleteProgram(program);
+        return 0;
+    }
+
+    return program;
 }

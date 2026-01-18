@@ -1,10 +1,69 @@
 #include "ui-controls.h"
 #include "font-rendering.h"
+#include "helpers/vulkan.h"
+#include "input-controller.h"
+
+// Undefine Windows.h macros that conflict
+#ifdef DrawText
+#undef DrawText
+#endif
+#ifdef max
+#undef max
+#endif
+#ifdef min
+#undef min
+#endif
+
 #include "ui-icons.h"
 #include "ui-primitives.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
+
+// Helper to draw a line as a thin quad
+static void DrawControlLine(float x1,
+                            float y1,
+                            float x2,
+                            float y2,
+                            float r,
+                            float g,
+                            float b,
+                            float a,
+                            float width = 1.5f)
+{
+    if (!g_buildingUIVertices)
+        return;
+
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.001f)
+        return;
+
+    float perpX = -dy / len * width * 0.5f;
+    float perpY = dx / len * width * 0.5f;
+
+    AddUIVertex(x1 + perpX, y1 + perpY, r, g, b, a);
+    AddUIVertex(x2 + perpX, y2 + perpY, r, g, b, a);
+    AddUIVertex(x1 - perpX, y1 - perpY, r, g, b, a);
+    AddUIVertex(x2 + perpX, y2 + perpY, r, g, b, a);
+    AddUIVertex(x2 - perpX, y2 - perpY, r, g, b, a);
+    AddUIVertex(x1 - perpX, y1 - perpY, r, g, b, a);
+}
+
+// Helper to draw a filled quad
+static void DrawControlQuad(float x, float y, float w, float h, float r, float g, float b, float a)
+{
+    if (!g_buildingUIVertices)
+        return;
+
+    AddUIVertex(x, y, r, g, b, a);
+    AddUIVertex(x + w, y, r, g, b, a);
+    AddUIVertex(x, y + h, r, g, b, a);
+    AddUIVertex(x + w, y, r, g, b, a);
+    AddUIVertex(x + w, y + h, r, g, b, a);
+    AddUIVertex(x, y + h, r, g, b, a);
+}
 
 
 // Draw a horizontal slider
@@ -42,6 +101,16 @@ bool DrawSlider(float x,
 
     bool isInTrack = (mouseX >= x && mouseX <= x + width && mouseY >= y && mouseY <= y + thumbHeight);
 
+    // Set cursor based on state
+    if (isDragging)
+    {
+        INPUT.setCursor(CursorType::Grabbing);
+    }
+    else if (isHoveringThumb || isInTrack)
+    {
+        INPUT.setCursor(CursorType::Hand);
+    }
+
     if (mouseDown && (isDragging || isInTrack))
     {
         isDragging = true;
@@ -52,7 +121,15 @@ bool DrawSlider(float x,
         double newLogVal = logMin + newNormalized * (logMax - logMin);
         double newValue = std::pow(10.0, newLogVal);
 
-        if (std::abs(newValue - *value) > 0.001)
+        // Use relative epsilon for comparison since values span a huge logarithmic range
+        // (from ~0.0000116 to 100, a ratio of ~8.6 million)
+        double relativeEpsilon = std::abs(*value) * 0.001; // 0.1% of current value
+        if (relativeEpsilon < 1e-10)
+        {
+            relativeEpsilon = 1e-10; // Minimum epsilon for very small values
+        }
+
+        if (std::abs(newValue - *value) > relativeEpsilon)
         {
             *value = newValue;
             valueChanged = true;
@@ -62,6 +139,96 @@ bool DrawSlider(float x,
     if (!mouseDown)
     {
         isDragging = false;
+    }
+
+    float thumbColor = (isHoveringThumb || isDragging) ? 0.95f : 0.8f;
+    DrawRoundedRect(thumbX, y, thumbWidth, thumbHeight, 3.0f, thumbColor, thumbColor, thumbColor, 1.0f);
+
+    return valueChanged;
+}
+
+// Draw a linear slider with optional snapping
+bool DrawLinearSlider(float x,
+                      float y,
+                      float width,
+                      float height,
+                      float *value,
+                      float minVal,
+                      float maxVal,
+                      float snapIncrement,
+                      double mouseX,
+                      double mouseY,
+                      bool mouseDown,
+                      bool &isDragging)
+{
+    bool valueChanged = false;
+
+    // Draw track background
+    DrawRoundedRect(x, y + height / 2 - 2, width, 4, 2.0f, 0.3f, 0.3f, 0.35f, 0.9f);
+
+    // Calculate normalized position
+    float normalizedPos = (*value - minVal) / (maxVal - minVal);
+    normalizedPos = std::max(0.0f, std::min(1.0f, normalizedPos));
+
+    float thumbWidth = 12.0f;
+    float thumbX = x + normalizedPos * (width - thumbWidth);
+    float thumbHeight = height;
+
+    bool isHoveringThumb =
+        (mouseX >= thumbX && mouseX <= thumbX + thumbWidth && mouseY >= y && mouseY <= y + thumbHeight);
+
+    if (mouseDown && isHoveringThumb && !isDragging)
+    {
+        isDragging = true;
+    }
+
+    bool isInTrack = (mouseX >= x && mouseX <= x + width && mouseY >= y && mouseY <= y + thumbHeight);
+
+    // Set cursor based on state
+    if (isDragging)
+    {
+        INPUT.setCursor(CursorType::Grabbing);
+    }
+    else if (isHoveringThumb || isInTrack)
+    {
+        INPUT.setCursor(CursorType::Hand);
+    }
+
+    if (mouseDown && (isDragging || isInTrack))
+    {
+        isDragging = true;
+
+        float newNormalized = static_cast<float>((mouseX - x - thumbWidth / 2) / (width - thumbWidth));
+        newNormalized = std::max(0.0f, std::min(1.0f, newNormalized));
+
+        float newValue = minVal + newNormalized * (maxVal - minVal);
+
+        // Apply snapping if increment is specified
+        if (snapIncrement > 0)
+        {
+            newValue = std::round(newValue / snapIncrement) * snapIncrement;
+        }
+
+        // Clamp to range
+        newValue = std::max(minVal, std::min(maxVal, newValue));
+
+        if (std::abs(newValue - *value) > 0.001f)
+        {
+            *value = newValue;
+            valueChanged = true;
+        }
+    }
+
+    if (!mouseDown)
+    {
+        isDragging = false;
+    }
+
+    // Draw filled portion of track
+    float filledWidth = thumbX - x + thumbWidth / 2;
+    if (filledWidth > 0)
+    {
+        DrawRoundedRect(x, y + height / 2 - 2, filledWidth, 4, 2.0f, 0.4f, 0.5f, 0.7f, 0.9f);
     }
 
     float thumbColor = (isHoveringThumb || isDragging) ? 0.95f : 0.8f;
@@ -85,37 +252,43 @@ bool DrawCheckbox(float x,
     float cbBoxY = y + (height - cbSize) / 2;
     bool isHovering = (mouseX >= x && mouseX <= x + width && mouseY >= y && mouseY <= y + height);
 
+    // Set pointer cursor when hovering
+    if (isHovering)
+    {
+        INPUT.setCursor(CursorType::Pointer);
+    }
+
     // Checkbox box background
-    glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
-    glBegin(GL_QUADS);
-    glVertex2f(x, cbBoxY);
-    glVertex2f(x + cbSize, cbBoxY);
-    glVertex2f(x + cbSize, cbBoxY + cbSize);
-    glVertex2f(x, cbBoxY + cbSize);
-    glEnd();
+    DrawControlQuad(x, cbBoxY, cbSize, cbSize, 0.25f, 0.25f, 0.3f, 0.9f);
 
     // Checkbox border
-    glColor4f(isHovering ? 0.6f : 0.4f, isHovering ? 0.6f : 0.4f, isHovering ? 0.65f : 0.45f, 0.9f);
-    glLineWidth(1.5f);
-    glBegin(GL_LINE_LOOP);
-    glVertex2f(x, cbBoxY);
-    glVertex2f(x + cbSize, cbBoxY);
-    glVertex2f(x + cbSize, cbBoxY + cbSize);
-    glVertex2f(x, cbBoxY + cbSize);
-    glEnd();
+    float borderC = isHovering ? 0.6f : 0.4f;
+    DrawControlLine(x, cbBoxY, x + cbSize, cbBoxY, borderC, borderC, borderC + 0.05f, 0.9f);
+    DrawControlLine(x + cbSize, cbBoxY, x + cbSize, cbBoxY + cbSize, borderC, borderC, borderC + 0.05f, 0.9f);
+    DrawControlLine(x + cbSize, cbBoxY + cbSize, x, cbBoxY + cbSize, borderC, borderC, borderC + 0.05f, 0.9f);
+    DrawControlLine(x, cbBoxY + cbSize, x, cbBoxY, borderC, borderC, borderC + 0.05f, 0.9f);
 
     // Checkmark if checked
     if (checked)
     {
-        glColor3f(0.3f, 0.9f, 0.4f);
-        glLineWidth(2.0f);
-        glBegin(GL_LINES);
-        glVertex2f(x + 3, cbBoxY + cbSize * 0.5f);
-        glVertex2f(x + cbSize * 0.4f, cbBoxY + cbSize - 3);
-        glVertex2f(x + cbSize * 0.4f, cbBoxY + cbSize - 3);
-        glVertex2f(x + cbSize - 2, cbBoxY + 2);
-        glEnd();
-        glLineWidth(1.0f);
+        DrawControlLine(x + 3,
+                        cbBoxY + cbSize * 0.5f,
+                        x + cbSize * 0.4f,
+                        cbBoxY + cbSize - 3,
+                        0.3f,
+                        0.9f,
+                        0.4f,
+                        1.0f,
+                        2.0f);
+        DrawControlLine(x + cbSize * 0.4f,
+                        cbBoxY + cbSize - 3,
+                        x + cbSize - 2,
+                        cbBoxY + 2,
+                        0.3f,
+                        0.9f,
+                        0.4f,
+                        1.0f,
+                        2.0f);
     }
 
     // Label
@@ -159,6 +332,12 @@ bool DrawButton(float x,
 {
     bool isHovering = (mouseX >= x && mouseX <= x + width && mouseY >= y && mouseY <= y + height);
 
+    // Set pointer cursor when hovering
+    if (isHovering)
+    {
+        INPUT.setCursor(CursorType::Pointer);
+    }
+
     // Button background
     if (isHovering)
     {
@@ -195,6 +374,12 @@ bool DrawAccordionHeader(float x,
                          bool mouseClicked)
 {
     bool isHovering = (mouseX >= x && mouseX <= x + width && mouseY >= y && mouseY <= y + height);
+
+    // Set pointer cursor when hovering
+    if (isHovering)
+    {
+        INPUT.setCursor(CursorType::Pointer);
+    }
 
     // Draw arrow
     float arrowX = x;

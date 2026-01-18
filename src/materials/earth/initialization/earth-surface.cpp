@@ -3,15 +3,16 @@
 // ============================================================================
 // All textures are in sinusoidal projection (orange peel layout)
 
+#include "../../../concerns/helpers/gl.h"
+#include "../../../concerns/helpers/shader-loader.h"
+#include "../../../concerns/helpers/vulkan.h"
 #include "../../../concerns/settings.h"
-#include "../../helpers/gl.h"
 #include "../../helpers/noise.h"
-#include "../../helpers/shader-loader.h"
 #include "../earth-material.h"
+#include "../voxel-octree.h"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib> // For std::exit
 #include <filesystem>
@@ -24,10 +25,19 @@
 #include <stb_image.h>
 
 
+// Forward declaration - VulkanContext needs to be accessible
+extern VulkanContext *g_vulkanContext;
+
 GLuint EarthMaterial::loadTexture(const std::string &filepath)
 {
+    if (!g_vulkanContext)
+    {
+        std::cerr << "Vulkan context not initialized!" << "\n";
+        return 0;
+    }
+
     int width, height, channels;
-    stbi_set_flip_vertically_on_load(true); // OpenGL expects bottom-to-top
+    stbi_set_flip_vertically_on_load(false); // Vulkan expects top-to-bottom
 
     unsigned char *data = stbi_load(filepath.c_str(), &width, &height, &channels, 0);
 
@@ -37,46 +47,66 @@ GLuint EarthMaterial::loadTexture(const std::string &filepath)
         return 0;
     }
 
-    GLenum format = GL_RGB;
-    GLenum internalFormat = GL_RGB;
+    // Convert to Vulkan format
+    VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    size_t pixelSize = 4;
     if (channels == 1)
     {
-        format = GL_LUMINANCE;
-        internalFormat = GL_LUMINANCE;
+        format = VK_FORMAT_R8_UNORM;
+        pixelSize = 1;
     }
     else if (channels == 2)
     {
         // 2-channel RG format (for wind textures: R=u, G=v)
-        format = GL_LUMINANCE_ALPHA; // GL_LUMINANCE_ALPHA maps R->LUMINANCE, G->ALPHA in older OpenGL
-        internalFormat = GL_LUMINANCE_ALPHA;
+        format = VK_FORMAT_R8G8_UNORM;
+        pixelSize = 2;
     }
     else if (channels == 3)
     {
-        format = GL_RGB;
-        internalFormat = GL_RGB;
+        format = VK_FORMAT_R8G8B8_UNORM;
+        pixelSize = 3;
+        // Convert RGB to RGBA for Vulkan (many formats prefer RGBA)
+        unsigned char *rgbaData = new unsigned char[width * height * 4];
+        for (int i = 0; i < width * height; i++)
+        {
+            rgbaData[i * 4 + 0] = data[i * 3 + 0];
+            rgbaData[i * 4 + 1] = data[i * 3 + 1];
+            rgbaData[i * 4 + 2] = data[i * 3 + 2];
+            rgbaData[i * 4 + 3] = 255;
+        }
+        stbi_image_free(data);
+        data = rgbaData;
+        format = VK_FORMAT_R8G8B8A8_UNORM;
+        pixelSize = 4;
     }
     else if (channels == 4)
     {
-        format = GL_RGBA;
-        internalFormat = GL_RGBA;
+        format = VK_FORMAT_R8G8B8A8_UNORM;
+        pixelSize = 4;
     }
 
-    GLuint textureId;
-    glGenTextures(1, &textureId);
-    glBindTexture(GL_TEXTURE_2D, textureId);
-
-    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, GL_UNSIGNED_BYTE, data);
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glBindTexture(GL_TEXTURE_2D, 0);
+    // Create Vulkan texture
+    VulkanTexture texture = createTexture2D(*g_vulkanContext,
+                                            static_cast<uint32_t>(width),
+                                            static_cast<uint32_t>(height),
+                                            format,
+                                            data,
+                                            VK_FILTER_LINEAR,
+                                            VK_FILTER_LINEAR,
+                                            VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                                            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     stbi_image_free(data);
 
-    return textureId;
+    // Register texture and return handle
+    if (!g_textureRegistry)
+    {
+        std::cerr << "Texture registry not initialized!" << "\n";
+        destroyTexture(*g_vulkanContext, texture);
+        return 0;
+    }
+
+    return g_textureRegistry->registerTexture(texture);
 }
 
 // Specialized loader for wind textures (2-channel RG format)
@@ -193,6 +223,23 @@ void EarthMaterial::generateNoiseTextures()
                         GL_REPEAT); // Tileable
         glBindTexture(GL_TEXTURE_2D, 0);
 
+        // Also create Vulkan texture and register it
+        extern TextureRegistry *g_textureRegistry;
+        if (g_vulkanContext && g_textureRegistry)
+        {
+            VulkanTexture vkTexture = createTexture2D(*g_vulkanContext,
+                                                      microWidth,
+                                                      microHeight,
+                                                      VK_FORMAT_R8_UNORM, // Single channel (luminance)
+                                                      microData.data(),
+                                                      VK_FILTER_LINEAR,
+                                                      VK_FILTER_LINEAR,
+                                                      VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                                                      VK_SAMPLER_ADDRESS_MODE_REPEAT);
+            // Register and update the handle to point to Vulkan texture
+            microNoiseTexture_ = g_textureRegistry->registerTexture(vkTexture);
+        }
+
         std::cout << "  Micro noise: " << microWidth << "x" << microHeight << " (fine flicker)" << "\n";
     }
 
@@ -240,6 +287,23 @@ void EarthMaterial::generateNoiseTextures()
                         GL_REPEAT); // Tileable
         glBindTexture(GL_TEXTURE_2D, 0);
 
+        // Also create Vulkan texture and register it
+        extern TextureRegistry *g_textureRegistry;
+        if (g_vulkanContext && g_textureRegistry)
+        {
+            VulkanTexture vkTexture = createTexture2D(*g_vulkanContext,
+                                                      hourlyWidth,
+                                                      hourlyHeight,
+                                                      VK_FORMAT_R8_UNORM, // Single channel (luminance)
+                                                      hourlyData.data(),
+                                                      VK_FILTER_LINEAR,
+                                                      VK_FILTER_LINEAR,
+                                                      VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                                                      VK_SAMPLER_ADDRESS_MODE_REPEAT);
+            // Register and update the handle to point to Vulkan texture
+            hourlyNoiseTexture_ = g_textureRegistry->registerTexture(vkTexture);
+        }
+
         std::cout << "  Hourly noise: " << hourlyWidth << "x" << hourlyHeight << " (regional variation)" << "\n";
     }
 
@@ -253,9 +317,17 @@ void EarthMaterial::generateNoiseTextures()
 
 bool EarthMaterial::initializeSurfaceShader()
 {
-    // Early return if shader is already compiled
-    if (shaderAvailable_ && shaderProgram_ != 0)
+    extern VulkanContext *g_vulkanContext;
+    if (!g_vulkanContext)
     {
+        std::cerr << "ERROR: Vulkan context not initialized!" << '\n';
+        return false;
+    }
+
+    // Early return if pipeline is already created
+    if (graphicsPipeline_ != VK_NULL_HANDLE)
+    {
+        shaderAvailable_ = true;
         return true;
     }
 
@@ -282,70 +354,192 @@ bool EarthMaterial::initializeSurfaceShader()
         std::exit(1);
     }
 
-    // Compile vertex shader
-    GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexShaderSource.c_str());
-    if (vertexShader == 0)
+    // Create Vulkan shader modules
+    VulkanShader vertexShader = createShaderModule(*g_vulkanContext, vertexShaderSource, VK_SHADER_STAGE_VERTEX_BIT);
+    VulkanShader fragmentShader =
+        createShaderModule(*g_vulkanContext, fragmentShaderSource, VK_SHADER_STAGE_FRAGMENT_BIT);
+
+    if (vertexShader.module == VK_NULL_HANDLE || fragmentShader.module == VK_NULL_HANDLE)
     {
-        std::cerr << "ERROR: EarthMaterial::initializeSurfaceShader() - Vertex "
-                     "shader compilation failed"
-                  << '\n';
-        std::cerr << "  Check console output above for shader compilation errors." << '\n';
-        std::exit(1);
+        std::cerr << "ERROR: Failed to create Vulkan shader modules!" << '\n';
+        if (vertexShader.module != VK_NULL_HANDLE)
+            destroyShaderModule(*g_vulkanContext, vertexShader);
+        if (fragmentShader.module != VK_NULL_HANDLE)
+            destroyShaderModule(*g_vulkanContext, fragmentShader);
+        return false;
     }
 
-    // Compile fragment shader
-    GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource.c_str());
-    if (fragmentShader == 0)
+    vertexShaderModule_ = vertexShader.module;
+    fragmentShaderModule_ = fragmentShader.module;
+
+    // Create descriptor set layout for uniforms and textures
+    // Vertex shader: binding 0-1 (samplers), binding 2 (Uniforms with MVP)
+    // Fragment shader: binding 0-15 (samplers), binding 16 (Uniforms)
+    // Note: Vertex and fragment shaders share some bindings (0-1 conflict!)
+    // We'll create bindings for all used slots:
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+
+    // Textures (binding 0-15) - used by both vertex (0-1) and fragment (0-15)
+    // Texture bindings: 0-15 for textures
+    // Note: Binding 2 is used for uNormalMap texture, so we skip it in the loop and add it separately
+    for (uint32_t i = 0; i < 16; i++)
     {
-        std::cerr << "ERROR: EarthMaterial::initializeSurfaceShader() - Fragment "
-                     "shader compilation failed"
-                  << '\n';
-        std::cerr << "  Check console output above for shader compilation errors." << '\n';
-        glDeleteShader(vertexShader);
-        std::exit(1);
+        // Skip binding 2 - it will be added as a texture binding below
+        if (i == 2)
+            continue;
+
+        VkDescriptorSetLayoutBinding binding{};
+        binding.binding = i;
+        binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        binding.descriptorCount = 1;
+        // Binding 0-1 used by vertex shader, all used by fragment shader
+        binding.stageFlags =
+            (i < 2) ? (VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT) : VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(binding);
     }
 
-    // Link program
-    shaderProgram_ = linkProgram(vertexShader, fragmentShader);
+    // Binding 2: uNormalMap texture (must be after the loop to avoid conflict with uniform buffer)
+    VkDescriptorSetLayoutBinding normalMapBinding{};
+    normalMapBinding.binding = 2;
+    normalMapBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    normalMapBinding.descriptorCount = 1;
+    normalMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings.push_back(normalMapBinding);
 
-    // Shaders can be deleted after linking
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
+    // Vertex shader uniform buffer (binding 17 - moved from 2 to avoid conflict)
+    VkDescriptorSetLayoutBinding vertexUniformBinding{};
+    vertexUniformBinding.binding = 17;
+    vertexUniformBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    vertexUniformBinding.descriptorCount = 1;
+    vertexUniformBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    bindings.push_back(vertexUniformBinding);
 
-    if (shaderProgram_ == 0)
+    // Fragment shader uniform buffer (binding 16)
+    VkDescriptorSetLayoutBinding fragmentUniformBinding{};
+    fragmentUniformBinding.binding = 16;
+    fragmentUniformBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    fragmentUniformBinding.descriptorCount = 1;
+    fragmentUniformBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings.push_back(fragmentUniformBinding);
+
+    descriptorSetLayout_ = createDescriptorSetLayout(*g_vulkanContext, bindings);
+
+    // Create descriptor pool
+    std::vector<VkDescriptorPoolSize> poolSizes;
+    VkDescriptorPoolSize texturePoolSize{};
+    texturePoolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    texturePoolSize.descriptorCount = 16 * 2; // 16 textures * 2 frames in flight
+    poolSizes.push_back(texturePoolSize);
+
+    VkDescriptorPoolSize uniformPoolSize{};
+    uniformPoolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    // Need 2 uniform buffers per descriptor set (bindings 16 and 17) × 2 frames in flight = 4 total
+    uniformPoolSize.descriptorCount = 4; // 2 uniform buffers (vertex + fragment) × 2 frames in flight
+    poolSizes.push_back(uniformPoolSize);
+
+    descriptorPool_ = createDescriptorPool(*g_vulkanContext, 2, poolSizes); // 2 frames in flight
+
+    // Allocate descriptor sets (one per frame in flight)
+    descriptorSets_ = allocateDescriptorSets(*g_vulkanContext, descriptorPool_, descriptorSetLayout_, 2);
+
+    // Create uniform buffers for vertex and fragment shaders
+    // Vertex shader Uniforms (binding 2): float + int + vec3*2 + float + vec3*4 + int + float + mat4 = ~128 bytes
+    // Fragment shader Uniforms (binding 16): float*3 + vec2 + vec3*5 + float + int*3 + ... = ~200 bytes
+    // Round up to 256 bytes each for alignment
+    size_t vertexUniformBufferSize = 256;
+    size_t fragmentUniformBufferSize = 256;
+
+    VulkanBuffer vertexUniformBuffer =
+        createBuffer(*g_vulkanContext,
+                     vertexUniformBufferSize,
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    VulkanBuffer fragmentUniformBuffer =
+        createBuffer(*g_vulkanContext,
+                     fragmentUniformBufferSize,
+                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    // Store uniform buffers
+    vertexUniformBuffer_ = vertexUniformBuffer;
+    fragmentUniformBuffer_ = fragmentUniformBuffer;
+
+    // Update descriptor sets with uniform buffers
+    for (size_t i = 0; i < descriptorSets_.size(); i++)
     {
-        std::cerr << "ERROR: EarthMaterial::initializeSurfaceShader() - Shader "
-                     "program linking failed"
-                  << '\n';
-        std::cerr << "  Check console output above for shader linking errors." << '\n';
-        std::exit(1);
+        updateDescriptorSetUniformBuffer(
+            *g_vulkanContext,
+            descriptorSets_[i],
+            17, // Vertex shader uniform binding (changed from 2 to avoid conflict with uNormalMap texture)
+            vertexUniformBuffer.buffer,
+            0,
+            vertexUniformBufferSize);
+
+        updateDescriptorSetUniformBuffer(*g_vulkanContext,
+                                         descriptorSets_[i],
+                                         16, // Fragment shader uniform binding
+                                         fragmentUniformBuffer.buffer,
+                                         0,
+                                         fragmentUniformBufferSize);
     }
 
-    // IMPORTANT: Activate shader program before getting uniform locations
-    // Some drivers require the program to be active when querying uniform
-    // locations
-    glUseProgram(shaderProgram_);
+    // Create graphics pipeline
+    PipelineCreateInfo pipelineInfo;
+    pipelineInfo.vertexShader = vertexShaderModule_;
+    pipelineInfo.fragmentShader = fragmentShaderModule_;
 
-    // Get uniform locations
-    uniformModelMatrix_ = glGetUniformLocation(shaderProgram_, "uModelMatrix");
-    uniformViewMatrix_ = glGetUniformLocation(shaderProgram_, "uViewMatrix");
-    uniformProjectionMatrix_ = glGetUniformLocation(shaderProgram_, "uProjectionMatrix");
-    uniformColorTexture_ = glGetUniformLocation(shaderProgram_, "uColorTexture");
-    uniformColorTexture2_ = glGetUniformLocation(shaderProgram_, "uColorTexture2");
-    uniformBlendFactor_ = glGetUniformLocation(shaderProgram_, "uBlendFactor");
-    uniformNormalMap_ = glGetUniformLocation(shaderProgram_, "uNormalMap");
-    uniformHeightmap_ = glGetUniformLocation(shaderProgram_, "uHeightmap");
-    uniformUseHeightmap_ = glGetUniformLocation(shaderProgram_, "uUseHeightmap");
-    uniformUseDisplacement_ = glGetUniformLocation(shaderProgram_, "uUseDisplacement");
-    uniformUseSpecular_ = glGetUniformLocation(shaderProgram_, "uUseSpecular");
-    uniformSpecular_ = glGetUniformLocation(shaderProgram_, "uSpecular");
-    uniformLightDir_ = glGetUniformLocation(shaderProgram_, "uLightDir");
-    uniformLightColor_ = glGetUniformLocation(shaderProgram_, "uLightColor");
-    uniformMoonDir_ = glGetUniformLocation(shaderProgram_, "uMoonDir");
-    uniformMoonColor_ = glGetUniformLocation(shaderProgram_, "uMoonColor");
-    uniformAmbientColor_ = glGetUniformLocation(shaderProgram_, "uAmbientColor");
-    uniformPoleDir_ = glGetUniformLocation(shaderProgram_, "uPoleDir");
-    uniformUseNormalMap_ = glGetUniformLocation(shaderProgram_, "uUseNormalMap");
+    // Vertex input (matches EarthVoxelOctree::MeshVertex)
+    VkVertexInputBindingDescription bindingDescription{};
+    bindingDescription.binding = 0;
+    bindingDescription.stride = sizeof(EarthVoxelOctree::MeshVertex);
+    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    pipelineInfo.vertexBindings.push_back(bindingDescription);
+
+    // Vertex attributes
+    // layout(location = 0) in vec3 aPosition;
+    VkVertexInputAttributeDescription posAttr{};
+    posAttr.location = 0;
+    posAttr.binding = 0;
+    posAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
+    posAttr.offset = offsetof(EarthVoxelOctree::MeshVertex, position);
+    pipelineInfo.vertexAttributes.push_back(posAttr);
+
+    // layout(location = 1) in vec2 aTexCoord;
+    VkVertexInputAttributeDescription texAttr{};
+    texAttr.location = 1;
+    texAttr.binding = 0;
+    texAttr.format = VK_FORMAT_R32G32_SFLOAT;
+    texAttr.offset = offsetof(EarthVoxelOctree::MeshVertex, uv);
+    pipelineInfo.vertexAttributes.push_back(texAttr);
+
+    // layout(location = 2) in vec3 aNormal;
+    VkVertexInputAttributeDescription normalAttr{};
+    normalAttr.location = 2;
+    normalAttr.binding = 0;
+    normalAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
+    normalAttr.offset = offsetof(EarthVoxelOctree::MeshVertex, normal);
+    pipelineInfo.vertexAttributes.push_back(normalAttr);
+
+    pipelineInfo.descriptorSetLayouts.push_back(descriptorSetLayout_);
+    pipelineInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    pipelineInfo.depthTest = true;
+    pipelineInfo.depthWrite = true;
+    pipelineInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+    // Enable backface culling (cull faces facing away from camera)
+    pipelineInfo.cullMode = VK_CULL_MODE_BACK_BIT;
+    pipelineInfo.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; // CCW vertices are front-facing
+
+    graphicsPipeline_ = createGraphicsPipeline(*g_vulkanContext, pipelineInfo, pipelineLayout_);
+
+    if (graphicsPipeline_ == VK_NULL_HANDLE)
+    {
+        std::cerr << "ERROR: Failed to create graphics pipeline!" << '\n';
+        return false;
+    }
+
+    shaderAvailable_ = true;
+    shaderProgram_ = 1; // Legacy compatibility
 
     // Restore program state (we activated it earlier to get uniform
     // locations)
@@ -381,6 +575,8 @@ bool EarthMaterial::initializeSurfaceShader()
     uniformSphereRadius_ = glGetUniformLocation(shaderProgram_, "uSphereRadius");
     uniformBillboardCenter_ = glGetUniformLocation(shaderProgram_, "uBillboardCenter");
     uniformDisplacementScale_ = glGetUniformLocation(shaderProgram_, "uDisplacementScale");
+    uniformShowWireframe_ = glGetUniformLocation(shaderProgram_, "uShowWireframe");
+    uniformMVP_ = glGetUniformLocation(shaderProgram_, "uMVP");
 
     shaderAvailable_ = true;
     return true;
@@ -396,6 +592,9 @@ bool EarthMaterial::initialize(const std::string &combinedBasePath, TextureResol
     std::string combinedPath = combinedBasePath + "/" + getResolutionFolderName(resolution);
     bool lossless = (resolution == TextureResolution::Ultra);
     const char *ext = lossless ? ".png" : ".jpg";
+
+    // Store base path for octree mesh generation
+    textureBasePath_ = combinedPath;
 
     std::cout << "Loading Earth textures from: " << combinedPath << "\n";
 
@@ -665,6 +864,10 @@ bool EarthMaterial::initialize(const std::string &combinedBasePath, TextureResol
 
     // Generate noise textures for city light flickering (requires GL context)
     generateNoiseTextures();
+
+    // Generate octree mesh from heightmap (requires heightmap to be loaded)
+    // This will be called later when we have display radius, but we can prepare here
+    // For now, we'll generate it on first draw call with actual radius
 
     // MANDATORY: Check required textures are loaded
     if (!elevationLoaded_ || normalMapTexture_ == 0)

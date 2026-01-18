@@ -4,7 +4,7 @@
 // Renders city labels and economy visualizations
 
 #include "../../../concerns/font-rendering.h"
-#include "../../helpers/gl.h"
+#include "../../../concerns/helpers/gl.h"
 #include "../earth-material.h"
 #include "../helpers/coordinate-conversion.h"
 #include "economy-renderer.h"
@@ -175,18 +175,17 @@ void EconomyRenderer::drawCityLabels(const glm::vec3 &earthPosition,
         return; // Nothing to render
     }
 
+    // TODO: Migrate economy rendering to Vulkan
     // Set up rendering state
-    glDisable(GL_LIGHTING);
-    glEnable(GL_DEPTH_TEST);
+    // glDisable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
+    // glEnable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state (depthTest=true)
+    // glDepthFunc(GL_LEQUAL); // REMOVED - migrate to Vulkan pipeline depth state (depthCompareOp=VK_COMPARE_OP_LESS_OR_EQUAL)
 
-    // Use depth function that allows labels to render on top of Earth
-    // GL_LEQUAL ensures labels at same or closer depth render
-    glDepthFunc(GL_LEQUAL);
-
+    // TODO: Migrate economy rendering to Vulkan
     // Enable depth bias to push labels slightly closer to camera
     // This ensures labels always render on top of Earth surface
-    glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(-1.0f, -1.0f); // Negative bias pushes closer to camera
+    // glEnable(GL_POLYGON_OFFSET_FILL); // REMOVED - migrate to Vulkan pipeline depth bias state
+    // glPolygonOffset(-1.0f, -1.0f); // REMOVED - migrate to Vulkan pipeline depth bias state
 
     // Calculate label size based on distance (closer = larger)
     // Base size: 12 pixels, scales with distance
@@ -226,19 +225,23 @@ void EconomyRenderer::drawCityLabels(const glm::vec3 &earthPosition,
         sinuUV.x = std::max(0.0f, std::min(1.0f, sinuUV.x));
         sinuUV.y = std::max(0.0f, std::min(1.0f, sinuUV.y));
 
+        // TODO: Migrate heightmap sampling to Vulkan
         // Save current state
-        GLint viewport[4];
-        glGetIntegerv(GL_VIEWPORT, viewport);
+        GLint viewport[4] = {0, 0, 0, 0}; // Default values - state queries removed
+        // glGetIntegerv(GL_VIEWPORT, viewport); // REMOVED - migrate to Vulkan
         GLint currentTexture = 0;
-        glGetIntegerv(GL_TEXTURE_BINDING_2D, &currentTexture);
-        GLboolean depthTest = glIsEnabled(GL_DEPTH_TEST);
-        GLboolean lighting = glIsEnabled(GL_LIGHTING);
-        GLboolean texture2d = glIsEnabled(GL_TEXTURE_2D);
+        // glGetIntegerv(GL_TEXTURE_BINDING_2D, &currentTexture); // REMOVED - migrate to Vulkan
+        GLboolean depthTest = false; // Default - state queries removed
+        // glIsEnabled(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan
+        GLboolean lighting = false; // Default
+        // glIsEnabled(GL_LIGHTING); // REMOVED - migrate to Vulkan
+        GLboolean texture2d = false; // Default
+        // glIsEnabled(GL_TEXTURE_2D); // REMOVED - migrate to Vulkan
         GLint matrixMode = 0;
-        glGetIntegerv(GL_MATRIX_MODE, &matrixMode);
+        // glGetIntegerv(GL_MATRIX_MODE, &matrixMode); // REMOVED - migrate to Vulkan
 
         // Set up a 1x1 viewport in the corner for sampling
-        glViewport(0, 0, 1, 1);
+        // glViewport(0, 0, 1, 1); // REMOVED - migrate to Vulkan (use setViewport)
 
         // Bind heightmap texture
         glBindTexture(GL_TEXTURE_2D, heightmapTexture);
@@ -246,61 +249,63 @@ void EconomyRenderer::drawCityLabels(const glm::vec3 &earthPosition,
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
         // Save current color and clear color
-        GLfloat clearColor[4];
-        glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
+        GLfloat clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // Default - state queries removed
+        // glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor); // REMOVED - migrate to Vulkan
 
+        // TODO: Migrate texture sampling to Vulkan (use compute shader or texture sampling API)
         // Set up ortho projection for texture sampling
-        glMatrixMode(GL_PROJECTION);
-        glPushMatrix();
-        glLoadIdentity();
-        glOrtho(0.0, 1.0, 0.0, 1.0, -1.0, 1.0);
+        // glMatrixMode(GL_PROJECTION); // REMOVED - migrate to Vulkan (matrices in uniform buffers)
+        // glPushMatrix(); // REMOVED - migrate to Vulkan
+        // glLoadIdentity(); // REMOVED - migrate to Vulkan
+        // glOrtho(0.0, 1.0, 0.0, 1.0, -1.0, 1.0); // REMOVED - migrate to Vulkan
 
-        glMatrixMode(GL_MODELVIEW);
-        glPushMatrix();
-        glLoadIdentity();
+        // glMatrixMode(GL_MODELVIEW); // REMOVED - migrate to Vulkan
+        // glPushMatrix(); // REMOVED - migrate to Vulkan
+        // glLoadIdentity(); // REMOVED - migrate to Vulkan
 
         // Draw a quad with the texture at the UV coordinates
         // We'll draw it off-screen in the corner where we can read it
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_LIGHTING);
-        glEnable(GL_TEXTURE_2D);
-        glColor3f(1.0f, 1.0f, 1.0f); // White to preserve texture color
+        // glDisable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline state
+        // glDisable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
+        // glEnable(GL_TEXTURE_2D); // REMOVED - migrate to Vulkan
+        // glColor3f(1.0f, 1.0f, 1.0f); // REMOVED - migrate to Vulkan uniform buffer
 
-        glBegin(GL_QUADS);
-        glTexCoord2f(sinuUV.x, sinuUV.y);
-        glVertex2f(0.0f, 0.0f);
-        glTexCoord2f(sinuUV.x, sinuUV.y);
-        glVertex2f(1.0f, 0.0f);
-        glTexCoord2f(sinuUV.x, sinuUV.y);
-        glVertex2f(1.0f, 1.0f);
-        glTexCoord2f(sinuUV.x, sinuUV.y);
-        glVertex2f(0.0f, 1.0f);
-        glEnd();
+        // glBegin(GL_QUADS); // REMOVED - migrate to Vulkan
+        // glTexCoord2f(sinuUV.x, sinuUV.y); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex2f(0.0f, 0.0f); // REMOVED - migrate to Vulkan vertex buffer
+        // glTexCoord2f(sinuUV.x, sinuUV.y); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex2f(1.0f, 0.0f); // REMOVED - migrate to Vulkan vertex buffer
+        // glTexCoord2f(sinuUV.x, sinuUV.y); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex2f(1.0f, 1.0f); // REMOVED - migrate to Vulkan vertex buffer
+        // glTexCoord2f(sinuUV.x, sinuUV.y); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex2f(0.0f, 1.0f); // REMOVED - migrate to Vulkan vertex buffer
+        // glEnd(); // REMOVED - migrate to Vulkan
 
         // Read pixel value from the default framebuffer (at corner of viewport)
-        unsigned char pixel[4];
-        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        unsigned char pixel[4] = {0, 0, 0, 255}; // Default - texture sampling removed
+        // glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel); // REMOVED - migrate to Vulkan (use texture sampling API)
 
         // Restore clear color
-        glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+        // glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]); // REMOVED - migrate to Vulkan render pass clear values
 
         // Restore state
-        glPopMatrix();
-        glMatrixMode(GL_PROJECTION);
-        glPopMatrix();
-        glMatrixMode(matrixMode);
+        // glPopMatrix(); // REMOVED - migrate to Vulkan
+        // glMatrixMode(GL_PROJECTION); // REMOVED - migrate to Vulkan
+        // glPopMatrix(); // REMOVED - migrate to Vulkan
+        // glMatrixMode(matrixMode); // REMOVED - migrate to Vulkan
 
         // Restore viewport
-        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        // glViewport(viewport[0], viewport[1], viewport[2], viewport[3]); // REMOVED - migrate to Vulkan (use setViewport)
 
-        if (depthTest)
-            glEnable(GL_DEPTH_TEST);
-        if (lighting)
-            glEnable(GL_LIGHTING);
-        if (!texture2d)
-            glDisable(GL_TEXTURE_2D);
+        // TODO: Migrate state restoration to Vulkan
+        // if (depthTest)
+        //     glEnable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline state
+        // if (lighting)
+        //     glEnable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
+        // if (!texture2d)
+        //     glDisable(GL_TEXTURE_2D); // REMOVED - migrate to Vulkan
 
-        glBindTexture(GL_TEXTURE_2D, currentTexture);
+        // glBindTexture(GL_TEXTURE_2D, currentTexture); // REMOVED - migrate to Vulkan (textures via descriptor sets)
 
         // Convert normalized value (0-255) back to meters
         float normalizedElevation = static_cast<float>(pixel[0]) / 255.0f;
@@ -457,16 +462,16 @@ void EconomyRenderer::drawCityLabels(const glm::vec3 &earthPosition,
                     p1 = clampVertexToSphere(p1);
                     p2 = clampVertexToSphere(p2);
 
-                    glVertex3f(p1.x, p1.y, p1.z);
-                    glVertex3f(p2.x, p2.y, p2.z);
+                    // glVertex3f(p1.x, p1.y, p1.z); // REMOVED - migrate to Vulkan vertex buffer
+                    // glVertex3f(p2.x, p2.y, p2.z); // REMOVED - migrate to Vulkan vertex buffer
                 }
             }
 
             currentX += charWidth + charHeight * 0.15f; // Advance cursor
         }
 
-        glEnd();
-        glLineWidth(1.0f); // Reset
+        // glEnd(); // REMOVED - migrate to Vulkan
+        // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
     }
 
     // Restore depth bias

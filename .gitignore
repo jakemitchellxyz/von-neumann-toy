@@ -1,8 +1,15 @@
 .env
+.cursorrules
+
+# Built from installation and cmake build setup
+.cache/
 vcpkg_installed/
 build/
-.cache/
+
+# Raw data; large files
 defaults/
+
+# built while running the app
+settings.json5
 earth-textures/
 celestial-skybox/
-settings.json5

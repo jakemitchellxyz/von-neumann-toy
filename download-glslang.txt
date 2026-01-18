@@ -1,0 +1,17 @@
+# 1. Define the URL for the master-tot (Tip of Tree) Windows release
+$url = "https://github.com/KhronosGroup/glslang/releases/download/master-tot/glslang-master-windows-x64-Release.zip"
+$dest = "$env:TEMP\glslang.zip"
+$extractPath = "$HOME\glslang"
+
+# 2. Download the zip
+Write-Host "Downloading glslangValidator..." -ForegroundColor Cyan
+Invoke-WebRequest -Uri $url -OutFile $dest
+
+# 3. Extract it
+if (!(Test-Path $extractPath)) { New-Item -ItemType Directory -Path $extractPath }
+Expand-Archive -Path $dest -DestinationPath $extractPath -Force
+
+# 4. Clean up and provide instructions
+Remove-Item $dest
+Write-Host "Success! You can find the tool here:" -ForegroundColor Green
+Write-Host "$extractPath\bin\glslangValidator.exe"

@@ -1,4 +1,11 @@
 #include "font-rendering.h"
+#include "helpers/vulkan.h"
+
+// Undefine Windows.h macro that conflicts with our DrawText function
+#ifdef DrawText
+#undef DrawText
+#endif
+
 #include <GLFW/glfw3.h>
 #include <cmath>
 #include <glm/glm.hpp>
@@ -338,31 +345,75 @@ std::map<char, std::vector<CharSegment>> CHAR_SEGMENTS = {
 
 void DrawText(float x, float y, const std::string &text, float scale, float r, float g, float b)
 {
-    glColor3f(r, g, b);
-    glLineWidth(1.5f);
-
     float charHeight = 12.0f * scale;
     float currentX = x;
+    const float lineWidth = 1.5f;
 
-    for (char c : text)
+    if (g_buildingUIVertices)
     {
-        auto segIt = CHAR_SEGMENTS.find(c);
-        auto widthIt = CHAR_WIDTHS.find(c);
-
-        float charWidth = (widthIt != CHAR_WIDTHS.end()) ? widthIt->second * charHeight : 0.5f * charHeight;
-
-        if (segIt != CHAR_SEGMENTS.end())
+        // Vulkan path: convert line segments to thin rectangles
+        for (char c : text)
         {
-            glBegin(GL_LINES);
-            for (const auto &seg : segIt->second)
-            {
-                glVertex2f(currentX + seg.x1 * charWidth, y + seg.y1 * charHeight);
-                glVertex2f(currentX + seg.x2 * charWidth, y + seg.y2 * charHeight);
-            }
-            glEnd();
-        }
+            auto segIt = CHAR_SEGMENTS.find(c);
+            auto widthIt = CHAR_WIDTHS.find(c);
+            float charWidth = (widthIt != CHAR_WIDTHS.end()) ? widthIt->second * charHeight : 0.5f * charHeight;
 
-        currentX += charWidth + 2.0f * scale;
+            if (segIt != CHAR_SEGMENTS.end())
+            {
+                for (const auto &seg : segIt->second)
+                {
+                    float x1 = currentX + seg.x1 * charWidth;
+                    float y1 = y + seg.y1 * charHeight;
+                    float x2 = currentX + seg.x2 * charWidth;
+                    float y2 = y + seg.y2 * charHeight;
+
+                    // Calculate perpendicular for line thickness
+                    float dx = x2 - x1;
+                    float dy = y2 - y1;
+                    float len = sqrtf(dx * dx + dy * dy);
+                    if (len > 0.001f)
+                    {
+                        float perpX = -dy / len * lineWidth * 0.5f;
+                        float perpY = dx / len * lineWidth * 0.5f;
+
+                        // Two triangles for the line segment quad
+                        AddUIVertex(x1 + perpX, y1 + perpY, r, g, b, 1.0f);
+                        AddUIVertex(x2 + perpX, y2 + perpY, r, g, b, 1.0f);
+                        AddUIVertex(x1 - perpX, y1 - perpY, r, g, b, 1.0f);
+
+                        AddUIVertex(x2 + perpX, y2 + perpY, r, g, b, 1.0f);
+                        AddUIVertex(x2 - perpX, y2 - perpY, r, g, b, 1.0f);
+                        AddUIVertex(x1 - perpX, y1 - perpY, r, g, b, 1.0f);
+                    }
+                }
+            }
+            currentX += charWidth + 2.0f * scale;
+        }
+    }
+    else
+    {
+        // OpenGL fallback
+        glColor3f(r, g, b);
+        glLineWidth(1.5f);
+
+        for (char c : text)
+        {
+            auto segIt = CHAR_SEGMENTS.find(c);
+            auto widthIt = CHAR_WIDTHS.find(c);
+            float charWidth = (widthIt != CHAR_WIDTHS.end()) ? widthIt->second * charHeight : 0.5f * charHeight;
+
+            if (segIt != CHAR_SEGMENTS.end())
+            {
+                glBegin(GL_LINES);
+                for (const auto &seg : segIt->second)
+                {
+                    glVertex2f(currentX + seg.x1 * charWidth, y + seg.y1 * charHeight);
+                    glVertex2f(currentX + seg.x2 * charWidth, y + seg.y2 * charHeight);
+                }
+                glEnd();
+            }
+            currentX += charWidth + 2.0f * scale;
+        }
     }
 }
 
@@ -429,8 +480,8 @@ void DrawBillboardText3D(const glm::vec3 &pos,
     // Start position (centered horizontally)
     float currentX = -totalWidth * 0.5f;
 
-    glLineWidth(1.5f);
-    glBegin(GL_LINES);
+    // glLineWidth(1.5f); // REMOVED - migrate to Vulkan pipeline state
+    // glBegin(GL_LINES); // REMOVED - migrate to Vulkan
 
     for (char c : text)
     {
@@ -453,13 +504,13 @@ void DrawBillboardText3D(const glm::vec3 &pos,
                 glm::vec3 p1 = pos + right * (currentX + seg.x1 * charWidth) + up * (y1_flipped * charHeight);
                 glm::vec3 p2 = pos + right * (currentX + seg.x2 * charWidth) + up * (y2_flipped * charHeight);
 
-                glVertex3f(p1.x, p1.y, p1.z);
-                glVertex3f(p2.x, p2.y, p2.z);
+                // glVertex3f(p1.x, p1.y, p1.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(p2.x, p2.y, p2.z); // REMOVED - migrate to Vulkan vertex buffer
             }
         }
 
         currentX += charWidth + charHeight * 0.15f; // Advance cursor
     }
 
-    glEnd();
+    // glEnd(); // REMOVED - migrate to Vulkan
 }

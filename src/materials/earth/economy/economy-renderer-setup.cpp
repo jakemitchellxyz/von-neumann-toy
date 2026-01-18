@@ -3,8 +3,9 @@
 // ============================================================================
 // Initializes shaders and resources for economy rendering
 
+#include "../../../concerns/helpers/gl.h"
 #include "economy-renderer.h"
-#include "../../helpers/gl.h"
+
 
 #include <iostream>
 

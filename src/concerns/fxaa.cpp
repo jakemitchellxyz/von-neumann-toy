@@ -3,11 +3,13 @@
 // ============================================================================
 
 #include "fxaa.h"
-#include "../materials/helpers/gl.h"
-#include "../materials/helpers/shader-loader.h"
+#include "helpers/gl.h"
+#include "helpers/shader-loader.h"
+#include "helpers/vulkan.h"
 #include "settings.h"
 #include <iostream>
 #include <vector>
+
 
 // FXAA state
 static bool g_fxaaInitialized = false;
@@ -21,23 +23,47 @@ static GLint g_uniformInvScreenSize = -1;
 static int g_framebufferWidth = 0;
 static int g_framebufferHeight = 0;
 
+// Fullscreen quad VAO/VBO for OpenGL 3.3 core profile
+static GLuint g_fxaaVAO = 0;
+static GLuint g_fxaaVBO = 0;
+static GLuint g_fxaaEBO = 0;
+static bool g_fxaaVAOCreated = false;
+
 // Fullscreen quad vertices (NDC space: -1 to 1)
 static const float g_fullscreenQuad[] = {
     // x, y, u, v
-    -1.0f, -1.0f, 0.0f, 0.0f, // Bottom-left
-     1.0f, -1.0f, 1.0f, 0.0f, // Bottom-right
-     1.0f,  1.0f, 1.0f, 1.0f, // Top-right
-    -1.0f,  1.0f, 0.0f, 1.0f  // Top-left
+    -1.0f,
+    -1.0f,
+    0.0f,
+    0.0f, // Bottom-left
+    1.0f,
+    -1.0f,
+    1.0f,
+    0.0f, // Bottom-right
+    1.0f,
+    1.0f,
+    1.0f,
+    1.0f, // Top-right
+    -1.0f,
+    1.0f,
+    0.0f,
+    1.0f // Top-left
 };
 
-static const unsigned int g_fullscreenQuadIndices[] = {
-    0, 1, 2,
-    0, 2, 3
-};
+static const unsigned int g_fullscreenQuadIndices[] = {0, 1, 2, 0, 2, 3};
 
 // Compile and link FXAA shader
 static bool compileFXAAShader()
 {
+    // Skip OpenGL shader initialization if Vulkan is available (migrating to Vulkan)
+    extern VulkanContext *g_vulkanContext;
+    if (g_vulkanContext)
+    {
+        // Vulkan is available, don't initialize OpenGL shaders
+        // TODO: Implement Vulkan FXAA pipeline
+        return false;
+    }
+
     if (glCreateShader == nullptr)
     {
         std::cerr << "FXAA: OpenGL shader extensions not loaded" << std::endl;
@@ -46,21 +72,19 @@ static bool compileFXAAShader()
 
     // Load vertex shader
     std::string vertexPath = "src/concerns/shaders/fxaa-vertex.glsl";
-    std::vector<std::string> vertexPaths = {
-        "shaders/fxaa-vertex.glsl",
-        "src/concerns/shaders/fxaa-vertex.glsl",
-        "../src/concerns/shaders/fxaa-vertex.glsl",
-        "../../src/concerns/shaders/fxaa-vertex.glsl"
-    };
-    
+    std::vector<std::string> vertexPaths = {"shaders/fxaa-vertex.glsl",
+                                            "src/concerns/shaders/fxaa-vertex.glsl",
+                                            "../src/concerns/shaders/fxaa-vertex.glsl",
+                                            "../../src/concerns/shaders/fxaa-vertex.glsl"};
+
     std::string vertexSource;
-    for (const auto& path : vertexPaths)
+    for (const auto &path : vertexPaths)
     {
         vertexSource = loadShaderFile(path);
         if (!vertexSource.empty())
             break;
     }
-    
+
     if (vertexSource.empty())
     {
         std::cerr << "FXAA: Failed to load vertex shader" << std::endl;
@@ -68,21 +92,19 @@ static bool compileFXAAShader()
     }
 
     // Load fragment shader
-    std::vector<std::string> fragmentPaths = {
-        "shaders/fxaa-fragment.glsl",
-        "src/concerns/shaders/fxaa-fragment.glsl",
-        "../src/concerns/shaders/fxaa-fragment.glsl",
-        "../../src/concerns/shaders/fxaa-fragment.glsl"
-    };
-    
+    std::vector<std::string> fragmentPaths = {"shaders/fxaa-fragment.glsl",
+                                              "src/concerns/shaders/fxaa-fragment.glsl",
+                                              "../src/concerns/shaders/fxaa-fragment.glsl",
+                                              "../../src/concerns/shaders/fxaa-fragment.glsl"};
+
     std::string fragmentSource;
-    for (const auto& path : fragmentPaths)
+    for (const auto &path : fragmentPaths)
     {
         fragmentSource = loadShaderFile(path);
         if (!fragmentSource.empty())
             break;
     }
-    
+
     if (fragmentSource.empty())
     {
         std::cerr << "FXAA: Failed to load fragment shader" << std::endl;
@@ -97,7 +119,7 @@ static bool compileFXAAShader()
         return false;
     }
 
-    const char* vertexSourcePtr = vertexSource.c_str();
+    const char *vertexSourcePtr = vertexSource.c_str();
     glShaderSource(vertexShader, 1, &vertexSourcePtr, nullptr);
     glCompileShader(vertexShader);
 
@@ -123,7 +145,7 @@ static bool compileFXAAShader()
         return false;
     }
 
-    const char* fragmentSourcePtr = fragmentSource.c_str();
+    const char *fragmentSourcePtr = fragmentSource.c_str();
     glShaderSource(fragmentShader, 1, &fragmentSourcePtr, nullptr);
     glCompileShader(fragmentShader);
 
@@ -201,7 +223,7 @@ static bool createFramebuffer(int width, int height)
 
     if (g_colorTexture != 0)
     {
-        glDeleteTextures(1, &g_colorTexture);
+        // glDeleteTextures(1, &g_colorTexture); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         g_colorTexture = 0;
     }
 
@@ -297,7 +319,7 @@ void CleanupFXAA()
 
     if (g_colorTexture != 0)
     {
-        glDeleteTextures(1, &g_colorTexture);
+        // glDeleteTextures(1, &g_colorTexture); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         g_colorTexture = 0;
     }
 
@@ -345,9 +367,9 @@ bool BeginFXAA()
 
     // Bind framebuffer
     glBindFramebuffer(GL_FRAMEBUFFER, g_framebuffer);
-    
+
     // Set viewport to framebuffer size
-    glViewport(0, 0, g_framebufferWidth, g_framebufferHeight);
+    // glViewport(0, 0, g_framebufferWidth, g_framebufferHeight); // REMOVED - migrate to Vulkan (use setViewport)
 
     return true;
 }
@@ -367,14 +389,16 @@ void EndFXAA()
     // Unbind framebuffer (render to screen)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+    // TODO: Migrate FXAA to Vulkan
     // Get current viewport size (screen size)
-    GLint viewport[4];
-    glGetIntegerv(GL_VIEWPORT, viewport);
-    int screenWidth = viewport[2];
-    int screenHeight = viewport[3];
+    // In Vulkan, get from swapchain extent or pass as parameters
+    GLint viewport[4] = {0, 0, 0, 0}; // Default - state query removed
+    // glGetIntegerv(GL_VIEWPORT, viewport); // REMOVED - migrate to Vulkan (get from swapchain extent)
+    int screenWidth = 0;  // TODO: Get from Vulkan swapchain extent
+    int screenHeight = 0; // TODO: Get from Vulkan swapchain extent
 
     // Set viewport to full screen
-    glViewport(0, 0, screenWidth, screenHeight);
+    // glViewport(0, 0, screenWidth, screenHeight); // REMOVED - migrate to Vulkan (use setViewport)
 
     // Use FXAA shader
     glUseProgram(g_shaderProgram);
@@ -391,38 +415,57 @@ void EndFXAA()
     }
     if (g_uniformInvScreenSize >= 0)
     {
-        glUniform2f(g_uniformInvScreenSize, 1.0f / static_cast<float>(screenWidth), 1.0f / static_cast<float>(screenHeight));
+        glUniform2f(g_uniformInvScreenSize,
+                    1.0f / static_cast<float>(screenWidth),
+                    1.0f / static_cast<float>(screenHeight));
     }
 
+    // TODO: Migrate FXAA rendering to Vulkan
     // Disable depth test for fullscreen quad
-    glDisable(GL_DEPTH_TEST);
+    // glDisable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state (depthTest=false for post-processing)
 
-    // Render fullscreen quad
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
+    // Create VAO/VBO on first use
+    if (!g_fxaaVAOCreated)
+    {
+        if (!loadGLExtensions() || glGenVertexArrays == nullptr)
+        {
+            std::cerr << "FXAA: VAO functions not available!" << std::endl;
+            return;
+        }
+
+        glGenVertexArrays(1, &g_fxaaVAO);
+        glGenBuffers(1, &g_fxaaVBO);
+        glGenBuffers(1, &g_fxaaEBO);
+
+        glBindVertexArray(g_fxaaVAO);
+
+        glBindBuffer(GL_ARRAY_BUFFER, g_fxaaVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(g_fullscreenQuad), g_fullscreenQuad, GL_STATIC_DRAW);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_fxaaEBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(g_fullscreenQuadIndices), g_fullscreenQuadIndices, GL_STATIC_DRAW);
+
+        // Position attribute (location 0)
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void *>(0));
+        glEnableVertexAttribArray(0);
+
+        // TexCoord attribute (location 1)
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void *>(2 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        glBindVertexArray(0);
+        g_fxaaVAOCreated = true;
+    }
+
+    // Render fullscreen quad using VAO
+    glBindVertexArray(g_fxaaVAO);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
     glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
 
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-    
-    glVertexPointer(2, GL_FLOAT, 4 * sizeof(float), g_fullscreenQuad);
-    glTexCoordPointer(2, GL_FLOAT, 4 * sizeof(float), g_fullscreenQuad + 2);
-    
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, g_fullscreenQuadIndices);
-    
-    glDisableClientState(GL_VERTEX_ARRAY);
-    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
-
+    // TODO: Migrate FXAA rendering to Vulkan
     // Re-enable depth test
-    glEnable(GL_DEPTH_TEST);
+    // glEnable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state (depthTest=true for normal rendering)
 
     // Unbind shader
     glUseProgram(0);

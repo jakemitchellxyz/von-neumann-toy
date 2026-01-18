@@ -7,7 +7,7 @@
 // ==================================
 // Reusable interactive UI components
 
-// Draw a horizontal slider
+// Draw a horizontal slider (logarithmic scale)
 // Returns true if value changed
 // x, y: position
 // width, height: dimensions
@@ -27,6 +27,29 @@ bool DrawSlider(float x,
                 double mouseY,
                 bool mouseDown,
                 bool &isDragging);
+
+// Draw a horizontal slider (linear scale with snapping)
+// Returns true if value changed
+// x, y: position
+// width, height: dimensions
+// value: pointer to current value (will be modified)
+// minVal, maxVal: value range (linear scale)
+// snapIncrement: value to snap to (0 for no snapping)
+// mouseX, mouseY: current mouse position
+// mouseDown: whether mouse button is currently pressed
+// isDragging: reference to dragging state (persists between calls)
+bool DrawLinearSlider(float x,
+                      float y,
+                      float width,
+                      float height,
+                      float *value,
+                      float minVal,
+                      float maxVal,
+                      float snapIncrement,
+                      double mouseX,
+                      double mouseY,
+                      bool mouseDown,
+                      bool &isDragging);
 
 // Draw a checkbox
 // Returns true if clicked this frame

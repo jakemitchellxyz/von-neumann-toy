@@ -3,11 +3,12 @@
 // ============================================================================
 
 #include "celestial-body.h"
-#include "dynamic-lod-sphere.h"
 #include "../concerns/constants.h"
+#include "../concerns/helpers/sphere-renderer.h"
 #include "../concerns/solar-lighting.h"
 #include "../concerns/spice-ephemeris.h"
 #include "../materials/earth/earth-material.h"
+#include "dynamic-lod-sphere.h"
 #include "magnetic-field.h"
 
 
@@ -15,10 +16,6 @@
 #include <algorithm>    // For std::sort
 #include <cmath>
 #include <glm/glm.hpp>
-
-
-// Forward declaration for DrawSphere (defined in entrypoint.cpp) - kept for non-lit objects
-void DrawSphere(const glm::vec3 &center, float radius, const glm::vec3 &color, int slices, int stacks);
 
 // ============================================================================
 // CelestialBody::draw()
@@ -71,12 +68,12 @@ void CelestialBody::draw(double julianDate, const glm::vec3 &cameraPos) const
             // Draw with solar lighting and proper SPICE-derived orientation
             // Use DynamicLODSphere for adaptive tessellation and occlusion culling
             extern bool g_showWireframe;
-            
+
             // Get camera info (use global if not provided)
             glm::vec3 actualCameraPos = cameraPos;
             glm::vec3 actualCameraDir = SolarLighting::getCameraDirection();
             float actualFov = SolarLighting::getCameraFov();
-            
+
             // Render using DynamicLODSphere with adaptive tessellation
             DynamicLODSphere::draw(position,
                                    displayRadius,
@@ -112,13 +109,14 @@ void CelestialBody::drawTrail() const
 
     glDisable(GL_LIGHTING);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE); // Don't write to depth buffer (transparent)
-    glLineWidth(2.0f);
+    // TODO: Migrate orbit trail rendering to Vulkan
+    // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // REMOVED - migrate to Vulkan pipeline blend state
+    // glEnable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state
+    // glDepthMask(GL_FALSE); // REMOVED - migrate to Vulkan pipeline depth state
+    // glLineWidth(2.0f); // REMOVED - migrate to Vulkan pipeline state
 
     // Draw trail as a line strip with fading alpha
-    glBegin(GL_LINE_STRIP);
+    // glBegin(GL_LINE_STRIP); // REMOVED - migrate to Vulkan
 
     size_t numPoints = trailPoints.size();
     for (size_t i = 0; i < numPoints; ++i)
@@ -128,13 +126,13 @@ void CelestialBody::drawTrail() const
         alpha = alpha * alpha; // Quadratic falloff for smoother fade
 
         // Use body color with fading alpha
-        glColor4f(color.r, color.g, color.b, alpha * 0.8f);
-        glVertex3f(trailPoints[i].x, trailPoints[i].y, trailPoints[i].z);
+        // glColor4f(color.r, color.g, color.b, alpha * 0.8f); // REMOVED - migrate to Vulkan uniform buffer
+        // glVertex3f(trailPoints[i].x, trailPoints[i].y, trailPoints[i].z); // REMOVED - migrate to Vulkan vertex buffer
     }
 
-    glEnd();
+    // glEnd(); // REMOVED - migrate to Vulkan
 
-    glLineWidth(1.0f);
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     glEnable(GL_LIGHTING);
@@ -215,22 +213,24 @@ void CelestialBody::drawRotationAxis() const
     glm::vec3 southPole = position - poleDirection * axisLength;
 
     // Disable lighting for line rendering
-    glDisable(GL_LIGHTING);
-    glLineWidth(2.0f);
+    // TODO: Migrate pole lines rendering to Vulkan
+    // glDisable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
+    // glLineWidth(2.0f); // REMOVED - migrate to Vulkan pipeline state
 
+    // TODO: Migrate pole line rendering to Vulkan
     // Draw north pole line (green)
-    glBegin(GL_LINES);
-    glColor3f(0.2f, 0.9f, 0.2f); // Green
-    glVertex3f(position.x, position.y, position.z);
-    glVertex3f(northPole.x, northPole.y, northPole.z);
-    glEnd();
+    // glBegin(GL_LINES); // REMOVED - migrate to Vulkan
+    // glColor3f(0.2f, 0.9f, 0.2f); // REMOVED - migrate to Vulkan uniform buffer
+    // glVertex3f(position.x, position.y, position.z); // REMOVED - migrate to Vulkan vertex buffer
+    // glVertex3f(northPole.x, northPole.y, northPole.z); // REMOVED - migrate to Vulkan vertex buffer
+    // glEnd(); // REMOVED - migrate to Vulkan
 
     // Draw south pole line (red)
-    glBegin(GL_LINES);
-    glColor3f(0.9f, 0.2f, 0.2f); // Red
-    glVertex3f(position.x, position.y, position.z);
-    glVertex3f(southPole.x, southPole.y, southPole.z);
-    glEnd();
+    // glBegin(GL_LINES); // REMOVED - migrate to Vulkan
+    // glColor3f(0.9f, 0.2f, 0.2f); // REMOVED - migrate to Vulkan uniform buffer
+    // glVertex3f(position.x, position.y, position.z); // REMOVED - migrate to Vulkan vertex buffer
+    // glVertex3f(southPole.x, southPole.y, southPole.z); // REMOVED - migrate to Vulkan vertex buffer
+    // glEnd(); // REMOVED - migrate to Vulkan
 
     // ==================================
     // Draw right-hand rule cone/arrow at north pole
@@ -252,22 +252,24 @@ void CelestialBody::drawRotationAxis() const
     glm::vec3 coneX = glm::normalize(glm::cross(up, arbitrary));
     glm::vec3 coneY = glm::normalize(glm::cross(up, coneX));
 
+    // TODO: Migrate rotation cone rendering to Vulkan
     // Draw cone surface (green)
-    glColor3f(0.3f, 0.85f, 0.3f);
-    glBegin(GL_TRIANGLE_FAN);
-    glVertex3f(coneTip.x, coneTip.y, coneTip.z);
+    // glColor3f(0.3f, 0.85f, 0.3f); // REMOVED - migrate to Vulkan uniform buffer
+    // glBegin(GL_TRIANGLE_FAN); // REMOVED - migrate to Vulkan
+    // glVertex3f(coneTip.x, coneTip.y, coneTip.z); // REMOVED - migrate to Vulkan vertex buffer
     for (int i = 0; i <= coneSegments; ++i)
     {
         float angle = 2.0f * static_cast<float>(PI) * static_cast<float>(i) / coneSegments;
         glm::vec3 point = coneBase + coneRadius * (cosf(angle) * coneX + sinf(angle) * coneY);
-        glVertex3f(point.x, point.y, point.z);
+        // glVertex3f(point.x, point.y, point.z); // REMOVED - migrate to Vulkan vertex buffer
     }
-    glEnd();
+    // glEnd(); // REMOVED - migrate to Vulkan
 
+    // TODO: Migrate rotation direction arrows to Vulkan
     // Draw rotation direction arrows around the cone (curved arrow effect)
     // Three small arrows spaced around the cone showing rotation direction
-    glColor3f(0.9f, 0.9f, 0.2f); // Yellow for rotation direction
-    glLineWidth(2.5f);
+    // glColor3f(0.9f, 0.9f, 0.2f); // REMOVED - migrate to Vulkan uniform buffer
+    // glLineWidth(2.5f); // REMOVED - migrate to Vulkan pipeline state
 
     float arrowRadius = coneRadius * 1.3f;
     float arrowHeight = coneHeight * 0.5f;
@@ -278,14 +280,14 @@ void CelestialBody::drawRotationAxis() const
         float baseAngle = 2.0f * static_cast<float>(PI) * static_cast<float>(a) / 3.0f;
 
         // Draw arc segment (counter-clockwise direction)
-        glBegin(GL_LINE_STRIP);
+        // glBegin(GL_LINE_STRIP); // REMOVED - migrate to Vulkan
         for (int i = 0; i <= 6; ++i)
         {
             float angle = baseAngle + static_cast<float>(PI) * 0.3f * static_cast<float>(i) / 6.0f;
             glm::vec3 point = arrowCenter + arrowRadius * (cosf(angle) * coneX + sinf(angle) * coneY);
-            glVertex3f(point.x, point.y, point.z);
+            // glVertex3f(point.x, point.y, point.z); // REMOVED - migrate to Vulkan vertex buffer
         }
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
 
         // Draw arrowhead at the end of the arc
         float endAngle = baseAngle + static_cast<float>(PI) * 0.3f;
@@ -296,16 +298,16 @@ void CelestialBody::drawRotationAxis() const
         glm::vec3 arrowHead1 = arrowEnd - tangent * (displayRadius * 0.08f) + poleDirection * (displayRadius * 0.06f);
         glm::vec3 arrowHead2 = arrowEnd - tangent * (displayRadius * 0.08f) - poleDirection * (displayRadius * 0.06f);
 
-        glBegin(GL_LINES);
-        glVertex3f(arrowEnd.x, arrowEnd.y, arrowEnd.z);
-        glVertex3f(arrowHead1.x, arrowHead1.y, arrowHead1.z);
-        glVertex3f(arrowEnd.x, arrowEnd.y, arrowEnd.z);
-        glVertex3f(arrowHead2.x, arrowHead2.y, arrowHead2.z);
-        glEnd();
+        // glBegin(GL_LINES); // REMOVED - migrate to Vulkan
+        // glVertex3f(arrowEnd.x, arrowEnd.y, arrowEnd.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowHead1.x, arrowHead1.y, arrowHead1.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowEnd.x, arrowEnd.y, arrowEnd.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowHead2.x, arrowHead2.y, arrowHead2.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glEnd(); // REMOVED - migrate to Vulkan
     }
 
-    glLineWidth(1.0f);
-    glEnable(GL_LIGHTING);
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
+    // glEnable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
 }
 
 // ============================================================================
@@ -326,23 +328,24 @@ void CelestialBody::drawEquator() const
     // Equator radius is slightly larger than body for visibility
     float equatorRadius = displayRadius * 1.05f;
 
-    glDisable(GL_LIGHTING);
-    glLineWidth(1.5f);
+    // TODO: Migrate equator rendering to Vulkan
+    // glDisable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
+    // glLineWidth(1.5f); // REMOVED - migrate to Vulkan pipeline state
 
     // Draw equator in a cyan/teal color
-    glColor3f(0.3f, 0.8f, 0.8f);
+    // glColor3f(0.3f, 0.8f, 0.8f); // REMOVED - migrate to Vulkan uniform buffer
 
-    glBegin(GL_LINE_LOOP);
+    // glBegin(GL_LINE_LOOP); // REMOVED - migrate to Vulkan
     for (int i = 0; i < segments; ++i)
     {
         float angle = 2.0f * static_cast<float>(PI) * static_cast<float>(i) / segments;
         glm::vec3 point = position + equatorRadius * (cosf(angle) * equatorX + sinf(angle) * equatorY);
-        glVertex3f(point.x, point.y, point.z);
+        // glVertex3f(point.x, point.y, point.z); // REMOVED - migrate to Vulkan vertex buffer
     }
-    glEnd();
+    // glEnd(); // REMOVED - migrate to Vulkan
 
-    glLineWidth(1.0f);
-    glEnable(GL_LIGHTING);
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
+    // glEnable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
 }
 
 // ============================================================================
@@ -376,12 +379,13 @@ void CelestialBody::drawForceVectors(const glm::vec3 &gravityAccel) const
 
         glm::vec3 gravEnd = position + gravDir * gravLength;
 
+        // TODO: Migrate gravity vector rendering to Vulkan
         // Draw gravity vector line (yellow/orange)
-        glColor3f(1.0f, 0.7f, 0.2f);
-        glBegin(GL_LINES);
-        glVertex3f(position.x, position.y, position.z);
-        glVertex3f(gravEnd.x, gravEnd.y, gravEnd.z);
-        glEnd();
+        // glColor3f(1.0f, 0.7f, 0.2f); // REMOVED - migrate to Vulkan uniform buffer
+        // glBegin(GL_LINES); // REMOVED - migrate to Vulkan
+        // glVertex3f(position.x, position.y, position.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(gravEnd.x, gravEnd.y, gravEnd.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glEnd(); // REMOVED - migrate to Vulkan
 
         // Draw arrowhead
         glm::vec3 perpX, perpY;
@@ -398,23 +402,23 @@ void CelestialBody::drawForceVectors(const glm::vec3 &gravityAccel) const
         float arrowSize = gravLength * 0.15f;
         glm::vec3 arrowBase = gravEnd - gravDir * arrowSize;
 
-        glBegin(GL_TRIANGLES);
-        glVertex3f(gravEnd.x, gravEnd.y, gravEnd.z);
-        glVertex3f(arrowBase.x + perpX.x * arrowSize * 0.4f,
-                   arrowBase.y + perpX.y * arrowSize * 0.4f,
-                   arrowBase.z + perpX.z * arrowSize * 0.4f);
-        glVertex3f(arrowBase.x - perpX.x * arrowSize * 0.4f,
-                   arrowBase.y - perpX.y * arrowSize * 0.4f,
-                   arrowBase.z - perpX.z * arrowSize * 0.4f);
+        // glBegin(GL_TRIANGLES); // REMOVED - migrate to Vulkan
+        // glVertex3f(gravEnd.x, gravEnd.y, gravEnd.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowBase.x + perpX.x * arrowSize * 0.4f,
+        //            arrowBase.y + perpX.y * arrowSize * 0.4f,
+        //            arrowBase.z + perpX.z * arrowSize * 0.4f); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowBase.x - perpX.x * arrowSize * 0.4f,
+        //            arrowBase.y - perpX.y * arrowSize * 0.4f,
+        //            arrowBase.z - perpX.z * arrowSize * 0.4f); // REMOVED - migrate to Vulkan vertex buffer
 
-        glVertex3f(gravEnd.x, gravEnd.y, gravEnd.z);
-        glVertex3f(arrowBase.x + perpY.x * arrowSize * 0.4f,
-                   arrowBase.y + perpY.y * arrowSize * 0.4f,
-                   arrowBase.z + perpY.z * arrowSize * 0.4f);
-        glVertex3f(arrowBase.x - perpY.x * arrowSize * 0.4f,
-                   arrowBase.y - perpY.y * arrowSize * 0.4f,
-                   arrowBase.z - perpY.z * arrowSize * 0.4f);
-        glEnd();
+        // glVertex3f(gravEnd.x, gravEnd.y, gravEnd.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowBase.x + perpY.x * arrowSize * 0.4f,
+        //            arrowBase.y + perpY.y * arrowSize * 0.4f,
+        //            arrowBase.z + perpY.z * arrowSize * 0.4f); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowBase.x - perpY.x * arrowSize * 0.4f,
+        //            arrowBase.y - perpY.y * arrowSize * 0.4f,
+        //            arrowBase.z - perpY.z * arrowSize * 0.4f); // REMOVED - migrate to Vulkan vertex buffer
+        // glEnd(); // REMOVED - migrate to Vulkan
     }
 
     // ==================================
@@ -433,10 +437,11 @@ void CelestialBody::drawForceVectors(const glm::vec3 &gravityAccel) const
 
         // Draw velocity vector line (cyan)
         glColor3f(0.2f, 0.9f, 1.0f);
-        glBegin(GL_LINES);
-        glVertex3f(position.x, position.y, position.z);
-        glVertex3f(velEnd.x, velEnd.y, velEnd.z);
-        glEnd();
+        // TODO: Migrate velocity vector rendering to Vulkan
+        // glBegin(GL_LINES); // REMOVED - migrate to Vulkan
+        // glVertex3f(position.x, position.y, position.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(velEnd.x, velEnd.y, velEnd.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glEnd(); // REMOVED - migrate to Vulkan
 
         // Draw arrowhead
         glm::vec3 perpX, perpY;
@@ -453,27 +458,27 @@ void CelestialBody::drawForceVectors(const glm::vec3 &gravityAccel) const
         float arrowSize = velLength * 0.15f;
         glm::vec3 arrowBase = velEnd - velDir * arrowSize;
 
-        glBegin(GL_TRIANGLES);
-        glVertex3f(velEnd.x, velEnd.y, velEnd.z);
-        glVertex3f(arrowBase.x + perpX.x * arrowSize * 0.4f,
-                   arrowBase.y + perpX.y * arrowSize * 0.4f,
-                   arrowBase.z + perpX.z * arrowSize * 0.4f);
-        glVertex3f(arrowBase.x - perpX.x * arrowSize * 0.4f,
-                   arrowBase.y - perpX.y * arrowSize * 0.4f,
-                   arrowBase.z - perpX.z * arrowSize * 0.4f);
+        // glBegin(GL_TRIANGLES); // REMOVED - migrate to Vulkan
+        // glVertex3f(velEnd.x, velEnd.y, velEnd.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowBase.x + perpX.x * arrowSize * 0.4f,
+        //            arrowBase.y + perpX.y * arrowSize * 0.4f,
+        //            arrowBase.z + perpX.z * arrowSize * 0.4f); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowBase.x - perpX.x * arrowSize * 0.4f,
+        //            arrowBase.y - perpX.y * arrowSize * 0.4f,
+        //            arrowBase.z - perpX.z * arrowSize * 0.4f); // REMOVED - migrate to Vulkan vertex buffer
 
-        glVertex3f(velEnd.x, velEnd.y, velEnd.z);
-        glVertex3f(arrowBase.x + perpY.x * arrowSize * 0.4f,
-                   arrowBase.y + perpY.y * arrowSize * 0.4f,
-                   arrowBase.z + perpY.z * arrowSize * 0.4f);
-        glVertex3f(arrowBase.x - perpY.x * arrowSize * 0.4f,
-                   arrowBase.y - perpY.y * arrowSize * 0.4f,
-                   arrowBase.z - perpY.z * arrowSize * 0.4f);
-        glEnd();
+        // glVertex3f(velEnd.x, velEnd.y, velEnd.z); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowBase.x + perpY.x * arrowSize * 0.4f,
+        //            arrowBase.y + perpY.y * arrowSize * 0.4f,
+        //            arrowBase.z + perpY.z * arrowSize * 0.4f); // REMOVED - migrate to Vulkan vertex buffer
+        // glVertex3f(arrowBase.x - perpY.x * arrowSize * 0.4f,
+        //            arrowBase.y - perpY.y * arrowSize * 0.4f,
+        //            arrowBase.z - perpY.z * arrowSize * 0.4f); // REMOVED - migrate to Vulkan vertex buffer
+        // glEnd(); // REMOVED - migrate to Vulkan
     }
 
-    glLineWidth(1.0f);
-    glEnable(GL_LIGHTING);
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
+    // glEnable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
 }
 
 
@@ -590,12 +595,13 @@ void CelestialBody::drawMagneticFieldLines() const
     double refRadiusKm = magneticField->getReferenceRadius();
     float scale = displayRadius / static_cast<float>(refRadiusKm);
 
-    glDisable(GL_LIGHTING);
-    glEnable(GL_DEPTH_TEST); // Enable depth test so lines behind planet are occluded
-    glDepthMask(GL_FALSE);   // Don't write to depth buffer (transparent lines)
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glLineWidth(2.5f); // Thicker lines for visibility
+    // TODO: Migrate magnetic field rendering to Vulkan
+    // glDisable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
+    // glEnable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state (depthTest=true)
+    // glDepthMask(GL_FALSE); // REMOVED - migrate to Vulkan pipeline depth state (depthWrite=false)
+    // glEnable(GL_BLEND); // REMOVED - migrate to Vulkan pipeline blend state
+    // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // REMOVED - migrate to Vulkan pipeline blend state
+    // glLineWidth(2.5f); // REMOVED - migrate to Vulkan pipeline state
 
     // Define colors for magnetic field visualization
     // Positive (north) pole color: warm red/orange
@@ -613,7 +619,7 @@ void CelestialBody::drawMagneticFieldLines() const
 
         size_t numPoints = line.points.size();
 
-        glBegin(GL_LINE_STRIP);
+        // glBegin(GL_LINE_STRIP); // REMOVED - migrate to Vulkan
         for (size_t i = 0; i < numPoints; ++i)
         {
             const auto &pt = line.points[i];
@@ -656,7 +662,7 @@ void CelestialBody::drawMagneticFieldLines() const
                 alpha = 0.75f; // Slightly more transparent for open lines
             }
 
-            glColor4f(color.r, color.g, color.b, alpha);
+            // glColor4f(color.r, color.g, color.b, alpha); // REMOVED - migrate to Vulkan uniform buffer
 
             // Convert from IGRF coords (Z north) to display coords (Y up)
             // IGRF X -> Display X, IGRF Z -> Display Y, IGRF Y -> Display -Z
@@ -666,12 +672,12 @@ void CelestialBody::drawMagneticFieldLines() const
             float z =
                 -static_cast<float>(pt.y) * scale + position.z; // IGRF Y -> Display -Z (negated for right-handedness)
 
-            glVertex3f(x, y, z);
+            // glVertex3f(x, y, z); // REMOVED - migrate to Vulkan vertex buffer
         }
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
     }
 
-    glLineWidth(1.0f);
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE); // Restore depth writing
     glEnable(GL_LIGHTING);
@@ -703,9 +709,10 @@ static void DrawBillboardLabel(const glm::vec3 &worldPos,
     // Center the text
     glm::vec3 startPos = worldPos - right * (totalWidth * 0.5f);
 
-    glDisable(GL_LIGHTING);
-    glDisable(GL_DEPTH_TEST);
-    glColor3f(textColor.r, textColor.g, textColor.b);
+    // TODO: Migrate text rendering to Vulkan
+    // glDisable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
+    // glDisable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state
+    // glColor3f(textColor.r, textColor.g, textColor.b); // REMOVED - migrate to Vulkan uniform buffer
 
     // Draw each character as simple lines (basic font)
     for (size_t i = 0; i < text.length(); ++i)
@@ -713,8 +720,9 @@ static void DrawBillboardLabel(const glm::vec3 &worldPos,
         glm::vec3 charPos = startPos + right * (i * charWidth + charWidth * 0.5f);
         char c = text[i];
 
-        glLineWidth(1.5f);
-        glBegin(GL_LINES);
+        // TODO: Migrate text rendering to Vulkan
+        // glLineWidth(1.5f); // REMOVED - migrate to Vulkan pipeline state
+        // glBegin(GL_LINES); // REMOVED - migrate to Vulkan
 
         // Simple stroke font for digits and degree symbol
         float h = charHeight * 0.5f;
@@ -727,220 +735,220 @@ static void DrawBillboardLabel(const glm::vec3 &worldPos,
             {
             case '0':
                 // Top
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 // Right
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 // Bottom
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 // Left
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '1':
-                glVertex3f(charPos.x + h * up.x, charPos.y + h * up.y, charPos.z + h * up.z);
-                glVertex3f(charPos.x - h * up.x, charPos.y - h * up.y, charPos.z - h * up.z);
+                // glVertex3f(charPos.x + h * up.x, charPos.y + h * up.y, charPos.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - h * up.x, charPos.y - h * up.y, charPos.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '2':
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '3':
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '4':
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '5':
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '6':
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '7':
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '8':
                 // Full 8 shape
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             case '9':
-                glVertex3f(charPos.x - w * right.x - h * up.x,
-                           charPos.y - w * right.y - h * up.y,
-                           charPos.z - w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x - h * up.x,
-                           charPos.y + w * right.y - h * up.y,
-                           charPos.z + w * right.z - h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x + w * right.x + h * up.x,
-                           charPos.y + w * right.y + h * up.y,
-                           charPos.z + w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x + h * up.x,
-                           charPos.y - w * right.y + h * up.y,
-                           charPos.z - w * right.z + h * up.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-                glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z);
+                // glVertex3f(charPos.x - w * right.x - h * up.x,
+                //            charPos.y - w * right.y - h * up.y,
+                //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x - h * up.x,
+                //            charPos.y + w * right.y - h * up.y,
+                //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x + h * up.x,
+                //            charPos.y + w * right.y + h * up.y,
+                //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x + h * up.x,
+                //            charPos.y - w * right.y + h * up.y,
+                //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+                // glVertex3f(charPos.x + w * right.x, charPos.y + w * right.y, charPos.z + w * right.z); // REMOVED - migrate to Vulkan vertex buffer
                 break;
             }
         }
@@ -998,57 +1006,57 @@ static void DrawBillboardLabel(const glm::vec3 &worldPos,
         }
         else if (c == 'E' || c == 'e')
         {
-            glVertex3f(charPos.x + w * right.x + h * up.x,
-                       charPos.y + w * right.y + h * up.y,
-                       charPos.z + w * right.z + h * up.z);
-            glVertex3f(charPos.x - w * right.x + h * up.x,
-                       charPos.y - w * right.y + h * up.y,
-                       charPos.z - w * right.z + h * up.z);
-            glVertex3f(charPos.x - w * right.x + h * up.x,
-                       charPos.y - w * right.y + h * up.y,
-                       charPos.z - w * right.z + h * up.z);
-            glVertex3f(charPos.x - w * right.x - h * up.x,
-                       charPos.y - w * right.y - h * up.y,
-                       charPos.z - w * right.z - h * up.z);
-            glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z);
-            glVertex3f(charPos.x + w * right.x * 0.5f, charPos.y + w * right.y * 0.5f, charPos.z + w * right.z * 0.5f);
-            glVertex3f(charPos.x - w * right.x - h * up.x,
-                       charPos.y - w * right.y - h * up.y,
-                       charPos.z - w * right.z - h * up.z);
-            glVertex3f(charPos.x + w * right.x - h * up.x,
-                       charPos.y + w * right.y - h * up.y,
-                       charPos.z + w * right.z - h * up.z);
+            // glVertex3f(charPos.x + w * right.x + h * up.x,
+            //            charPos.y + w * right.y + h * up.y,
+            //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x - w * right.x + h * up.x,
+            //            charPos.y - w * right.y + h * up.y,
+            //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x - w * right.x + h * up.x,
+            //            charPos.y - w * right.y + h * up.y,
+            //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x - w * right.x - h * up.x,
+            //            charPos.y - w * right.y - h * up.y,
+            //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x - w * right.x, charPos.y - w * right.y, charPos.z - w * right.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x + w * right.x * 0.5f, charPos.y + w * right.y * 0.5f, charPos.z + w * right.z * 0.5f); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x - w * right.x - h * up.x,
+            //            charPos.y - w * right.y - h * up.y,
+            //            charPos.z - w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x + w * right.x - h * up.x,
+            //            charPos.y + w * right.y - h * up.y,
+            //            charPos.z + w * right.z - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
         }
         else if (c == 'W' || c == 'w')
         {
-            glVertex3f(charPos.x - w * right.x + h * up.x,
-                       charPos.y - w * right.y + h * up.y,
-                       charPos.z - w * right.z + h * up.z);
-            glVertex3f(charPos.x - w * right.x * 0.5f - h * up.x,
-                       charPos.y - w * right.y * 0.5f - h * up.y,
-                       charPos.z - w * right.z * 0.5f - h * up.z);
-            glVertex3f(charPos.x - w * right.x * 0.5f - h * up.x,
-                       charPos.y - w * right.y * 0.5f - h * up.y,
-                       charPos.z - w * right.z * 0.5f - h * up.z);
-            glVertex3f(charPos.x, charPos.y, charPos.z);
-            glVertex3f(charPos.x, charPos.y, charPos.z);
-            glVertex3f(charPos.x + w * right.x * 0.5f - h * up.x,
-                       charPos.y + w * right.y * 0.5f - h * up.y,
-                       charPos.z + w * right.z * 0.5f - h * up.z);
-            glVertex3f(charPos.x + w * right.x * 0.5f - h * up.x,
-                       charPos.y + w * right.y * 0.5f - h * up.y,
-                       charPos.z + w * right.z * 0.5f - h * up.z);
-            glVertex3f(charPos.x + w * right.x + h * up.x,
-                       charPos.y + w * right.y + h * up.y,
-                       charPos.z + w * right.z + h * up.z);
+            // glVertex3f(charPos.x - w * right.x + h * up.x,
+            //            charPos.y - w * right.y + h * up.y,
+            //            charPos.z - w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x - w * right.x * 0.5f - h * up.x,
+            //            charPos.y - w * right.y * 0.5f - h * up.y,
+            //            charPos.z - w * right.z * 0.5f - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x - w * right.x * 0.5f - h * up.x,
+            //            charPos.y - w * right.y * 0.5f - h * up.y,
+            //            charPos.z - w * right.z * 0.5f - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x, charPos.y, charPos.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x, charPos.y, charPos.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x + w * right.x * 0.5f - h * up.x,
+            //            charPos.y + w * right.y * 0.5f - h * up.y,
+            //            charPos.z + w * right.z * 0.5f - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x + w * right.x * 0.5f - h * up.x,
+            //            charPos.y + w * right.y * 0.5f - h * up.y,
+            //            charPos.z + w * right.z * 0.5f - h * up.z); // REMOVED - migrate to Vulkan vertex buffer
+            // glVertex3f(charPos.x + w * right.x + h * up.x,
+            //            charPos.y + w * right.y + h * up.y,
+            //            charPos.z + w * right.z + h * up.z); // REMOVED - migrate to Vulkan vertex buffer
         }
 
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
     }
 
-    glLineWidth(1.0f);
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_LIGHTING);
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
+    // glEnable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state (depthTest=true)
+    // glEnable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
 }
 
 // Structure to hold label info for sorting by distance
@@ -1162,19 +1170,20 @@ void CelestialBody::drawCoordinateGrid(const glm::vec3 &cameraPos,
         // Prime meridian (0 degrees) is brighter
         if (lonDeg == 0)
         {
-            glColor4f(1.0f, 0.4f, 0.4f, 0.8f); // Red for prime meridian
-            glLineWidth(2.5f);
+            // glColor4f(1.0f, 0.4f, 0.4f, 0.8f); // REMOVED - migrate to Vulkan uniform buffer
+            // glLineWidth(2.5f); // REMOVED - migrate to Vulkan pipeline state
         }
         else
         {
-            glColor4f(0.6f, 0.6f, 0.8f, 0.5f); // Blue for other meridians
-            glLineWidth(1.5f);
+            // glColor4f(0.6f, 0.6f, 0.8f, 0.5f); // REMOVED - migrate to Vulkan uniform buffer
+            // glLineWidth(1.5f); // REMOVED - migrate to Vulkan pipeline state
         }
 
         // Direction on equatorial plane for this longitude
         glm::vec3 lonDir = east * std::cos(lonRad) + equatorY * std::sin(lonRad);
 
-        glBegin(GL_LINE_STRIP);
+        // TODO: Migrate coordinate grid rendering to Vulkan
+        // glBegin(GL_LINE_STRIP); // REMOVED - migrate to Vulkan
         for (int i = 0; i <= lonSegments; ++i)
         {
             // Latitude from -90 to +90
@@ -1183,9 +1192,9 @@ void CelestialBody::drawCoordinateGrid(const glm::vec3 &cameraPos,
             float sinLat = std::sin(lat);
 
             glm::vec3 point = position + gridRadius * (north * sinLat + lonDir * cosLat);
-            glVertex3f(point.x, point.y, point.z);
+            // glVertex3f(point.x, point.y, point.z); // REMOVED - migrate to Vulkan vertex buffer
         }
-        glEnd();
+        // glEnd(); // REMOVED - migrate to Vulkan
 
         // Add label at equator
         glm::vec3 labelPos = position + lonDir * gridRadius * 1.05f;
@@ -1205,8 +1214,8 @@ void CelestialBody::drawCoordinateGrid(const glm::vec3 &cameraPos,
         labels.push_back(label);
     }
 
-    glLineWidth(1.0f);
-    glDisable(GL_BLEND);
+    // glLineWidth(1.0f); // REMOVED - migrate to Vulkan pipeline state
+    // glDisable(GL_BLEND); // REMOVED - migrate to Vulkan pipeline blend state
 
     // ==================================
     // Draw only the 5 closest labels
@@ -1226,5 +1235,5 @@ void CelestialBody::drawCoordinateGrid(const glm::vec3 &cameraPos,
         DrawBillboardLabel(labels[i].position, labels[i].text, cameraPos, cameraFront, cameraUp, labelScale, textColor);
     }
 
-    glEnable(GL_LIGHTING);
+    // glEnable(GL_LIGHTING); // REMOVED - migrate to Vulkan (lighting in shaders)
 }

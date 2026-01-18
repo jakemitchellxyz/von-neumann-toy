@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app-state.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
@@ -19,12 +20,18 @@ enum class CameraFollowMode {
 class CameraController {
 public:
     // ==================================
-    // Camera State
+    // Camera State - stored in APP_STATE.worldState.camera
     // ==================================
-    glm::vec3 position;
-    float yaw;    // Horizontal angle in degrees
-    float pitch;  // Vertical angle in degrees
-    float roll;   // Roll angle in degrees (rotation around forward axis)
+    // Position, yaw, pitch, roll, and fov are now accessed via:
+    //   APP_STATE.worldState.camera.position
+    //   APP_STATE.worldState.camera.yaw
+    //   APP_STATE.worldState.camera.pitch
+    //   APP_STATE.worldState.camera.roll
+    //   APP_STATE.worldState.camera.fov
+    
+    // Helper accessors for convenience
+    CameraState& camera() { return APP_STATE.worldState.camera; }
+    const CameraState& camera() const { return APP_STATE.worldState.camera; }
     
     // ==================================
     // Configuration
@@ -35,7 +42,6 @@ public:
     float panSpeed;
     float scrollSpeed;
     float orbitSpeed;
-    float fov;
     
     // Max raycast distance (should be set to Pluto's orbital distance)
     float maxRayDistance;

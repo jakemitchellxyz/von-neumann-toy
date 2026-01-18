@@ -159,8 +159,8 @@ const float SKYBOX_RADIUS = 50000.0f;    // Large sphere encompassing the solar 
 // ==================================
 // Render Settings
 // ==================================
-bool g_showOrbits = false;              // Default to disabled
-bool g_showRotationAxes = false;        // Default to disabled
+bool g_showOrbits = false;       // Default to disabled
+bool g_showRotationAxes = false; // Default to disabled
 bool g_showBarycenters = false;
 bool g_showLagrangePoints = false;
 bool g_showCoordinateGrids = false;
@@ -173,8 +173,10 @@ bool g_showCelestialGrid = false;        // Default to hidden
 bool g_showConstellationFigures = false; // Default to hidden
 bool g_showConstellationBounds = false;  // Default to hidden
 bool g_showForceVectors = false;
-bool g_showSunSpot = false;             // Default to disabled
-bool g_showWireframe = false;            // Default to hidden
+bool g_showSunSpot = false;          // Default to disabled
+bool g_showWireframe = false;        // Default to hidden
+bool g_showVoxelWireframes = false;  // Default to hidden
+bool g_showAtmosphereLayers = false; // Default to hidden
 
 // ==================================
 // Helper Functions

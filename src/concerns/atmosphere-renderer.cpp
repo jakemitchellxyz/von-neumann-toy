@@ -3,14 +3,17 @@
 // ============================================================================
 
 #include "atmosphere-renderer.h"
-#include "../materials/helpers/gl.h"
-#include "../materials/helpers/shader-loader.h"
+#include "helpers/gl.h"
+#include "helpers/shader-loader.h"
+#include "helpers/vulkan.h"
 #include <GLFW/glfw3.h>
+#include <cstddef> // for offsetof (though we use reinterpret_cast instead)
+#include <filesystem>
 #include <iostream>
+#include <stb_image.h>
 #include <string>
 #include <vector>
-#include <filesystem>
-#include <stb_image.h>
+
 
 // Atmosphere renderer state
 static bool g_atmosphereInitialized = false;
@@ -36,23 +39,47 @@ static GLint g_uniformTransmittanceLUT = -1;
 static GLint g_uniformScatteringLUT = -1;
 static GLint g_uniformDebugMode = -1;
 
+// Fullscreen quad VAO/VBO for OpenGL 3.3 core profile
+static GLuint g_atmosphereVAO = 0;
+static GLuint g_atmosphereVBO = 0;
+static GLuint g_atmosphereEBO = 0;
+static bool g_atmosphereVAOCreated = false;
+
 // Fullscreen quad vertices (NDC space: -1 to 1)
 static const float g_fullscreenQuad[] = {
     // x, y, u, v
-    -1.0f, -1.0f, 0.0f, 0.0f, // Bottom-left
-     1.0f, -1.0f, 1.0f, 0.0f, // Bottom-right
-     1.0f,  1.0f, 1.0f, 1.0f, // Top-right
-    -1.0f,  1.0f, 0.0f, 1.0f  // Top-left
+    -1.0f,
+    -1.0f,
+    0.0f,
+    0.0f, // Bottom-left
+    1.0f,
+    -1.0f,
+    1.0f,
+    0.0f, // Bottom-right
+    1.0f,
+    1.0f,
+    1.0f,
+    1.0f, // Top-right
+    -1.0f,
+    1.0f,
+    0.0f,
+    1.0f // Top-left
 };
 
-static const unsigned int g_fullscreenQuadIndices[] = {
-    0, 1, 2,
-    0, 2, 3
-};
+static const unsigned int g_fullscreenQuadIndices[] = {0, 1, 2, 0, 2, 3};
 
 // Compile and link atmosphere shader
 static bool compileAtmosphereShader()
 {
+    // Skip OpenGL shader initialization if Vulkan is available (migrating to Vulkan)
+    extern VulkanContext *g_vulkanContext;
+    if (g_vulkanContext)
+    {
+        // Vulkan is available, don't initialize OpenGL shaders
+        // TODO: Implement Vulkan atmosphere pipeline
+        return false;
+    }
+
     if (glCreateShader == nullptr)
     {
         std::cerr << "Atmosphere: OpenGL shader extensions not loaded" << std::endl;
@@ -60,16 +87,14 @@ static bool compileAtmosphereShader()
     }
 
     // Load vertex shader
-    std::vector<std::string> vertexPaths = {
-        "shaders/atmosphere-vertex.glsl",
-        "src/concerns/shaders/atmosphere-vertex.glsl",
-        "../src/concerns/shaders/atmosphere-vertex.glsl",
-        "../../src/concerns/shaders/atmosphere-vertex.glsl"
-    };
-    
+    std::vector<std::string> vertexPaths = {"shaders/atmosphere-vertex.glsl",
+                                            "src/concerns/shaders/atmosphere-vertex.glsl",
+                                            "../src/concerns/shaders/atmosphere-vertex.glsl",
+                                            "../../src/concerns/shaders/atmosphere-vertex.glsl"};
+
     std::string vertexSource;
     std::string vertexPath;
-    for (const auto& path : vertexPaths)
+    for (const auto &path : vertexPaths)
     {
         if (std::filesystem::exists(path))
         {
@@ -79,30 +104,29 @@ static bool compileAtmosphereShader()
                 break;
         }
     }
-    
+
     if (vertexSource.empty())
     {
         std::cerr << "Atmosphere: Failed to load vertex shader (tried: ";
         for (size_t i = 0; i < vertexPaths.size(); ++i)
         {
             std::cerr << vertexPaths[i];
-            if (i < vertexPaths.size() - 1) std::cerr << ", ";
+            if (i < vertexPaths.size() - 1)
+                std::cerr << ", ";
         }
         std::cerr << ")" << std::endl;
         return false;
     }
 
     // Load fragment shader
-    std::vector<std::string> fragmentPaths = {
-        "shaders/atmosphere-fragment.glsl",
-        "src/concerns/shaders/atmosphere-fragment.glsl",
-        "../src/concerns/shaders/atmosphere-fragment.glsl",
-        "../../src/concerns/shaders/atmosphere-fragment.glsl"
-    };
-    
+    std::vector<std::string> fragmentPaths = {"shaders/atmosphere-fragment.glsl",
+                                              "src/concerns/shaders/atmosphere-fragment.glsl",
+                                              "../src/concerns/shaders/atmosphere-fragment.glsl",
+                                              "../../src/concerns/shaders/atmosphere-fragment.glsl"};
+
     std::string fragmentSource;
     std::string fragmentPath;
-    for (const auto& path : fragmentPaths)
+    for (const auto &path : fragmentPaths)
     {
         if (std::filesystem::exists(path))
         {
@@ -112,14 +136,15 @@ static bool compileAtmosphereShader()
                 break;
         }
     }
-    
+
     if (fragmentSource.empty())
     {
         std::cerr << "Atmosphere: Failed to load fragment shader (tried: ";
         for (size_t i = 0; i < fragmentPaths.size(); ++i)
         {
             std::cerr << fragmentPaths[i];
-            if (i < fragmentPaths.size() - 1) std::cerr << ", ";
+            if (i < fragmentPaths.size() - 1)
+                std::cerr << ", ";
         }
         std::cerr << ")" << std::endl;
         return false;
@@ -133,7 +158,7 @@ static bool compileAtmosphereShader()
         return false;
     }
 
-    const char* vertexSourcePtr = vertexSource.c_str();
+    const char *vertexSourcePtr = vertexSource.c_str();
     glShaderSource(vertexShader, 1, &vertexSourcePtr, nullptr);
     glCompileShader(vertexShader);
 
@@ -159,7 +184,7 @@ static bool compileAtmosphereShader()
         return false;
     }
 
-    const char* fragmentSourcePtr = fragmentSource.c_str();
+    const char *fragmentSourcePtr = fragmentSource.c_str();
     glShaderSource(fragmentShader, 1, &fragmentSourcePtr, nullptr);
     glCompileShader(fragmentShader);
 
@@ -225,7 +250,7 @@ static bool compileAtmosphereShader()
     g_uniformTransmittanceLUT = glGetUniformLocation(g_shaderProgram, "uTransmittanceLUT");
     g_uniformScatteringLUT = glGetUniformLocation(g_shaderProgram, "uScatteringLUT");
     g_uniformDebugMode = glGetUniformLocation(g_shaderProgram, "uDebugMode");
-    
+
     if (g_uniformDebugMode < 0)
     {
         std::cerr << "Atmosphere: WARNING - uDebugMode uniform not found in shader!" << std::endl;
@@ -234,7 +259,7 @@ static bool compileAtmosphereShader()
     {
         std::cout << "Atmosphere: uDebugMode uniform found at location " << g_uniformDebugMode << std::endl;
     }
-    
+
     // Test setting the uniform immediately to verify it works
     if (g_uniformDebugMode >= 0)
     {
@@ -314,15 +339,16 @@ bool InitAtmosphereRenderer()
 
 void CleanupAtmosphereRenderer()
 {
+    // TODO: Migrate texture cleanup to Vulkan
     if (g_transmittanceLUT != 0)
     {
-        glDeleteTextures(1, &g_transmittanceLUT);
+        // glDeleteTextures(1, &g_transmittanceLUT); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         g_transmittanceLUT = 0;
     }
 
     if (g_scatteringLUT != 0)
     {
-        glDeleteTextures(1, &g_scatteringLUT);
+        // glDeleteTextures(1, &g_scatteringLUT); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         g_scatteringLUT = 0;
     }
 
@@ -357,7 +383,7 @@ bool LoadAtmosphereLUTs(const std::string &transmittancePath, const std::string 
     if (g_scatteringLUT == 0)
     {
         std::cerr << "Atmosphere: Failed to load scattering LUT: " << scatteringPath << std::endl;
-        glDeleteTextures(1, &g_transmittanceLUT);
+        // glDeleteTextures(1, &g_transmittanceLUT); // REMOVED - migrate to Vulkan (textures managed via texture registry)
         g_transmittanceLUT = 0;
         return false;
     }
@@ -394,7 +420,8 @@ void RenderAtmosphere(const glm::vec3 &cameraPos,
     {
         std::cout << "DEBUG: RenderAtmosphere called (frame " << renderCount << ")" << std::endl;
         std::cout << "  Camera pos: " << cameraPos.x << ", " << cameraPos.y << ", " << cameraPos.z << std::endl;
-        std::cout << "  Planet center: " << planetCenter.x << ", " << planetCenter.y << ", " << planetCenter.z << std::endl;
+        std::cout << "  Planet center: " << planetCenter.x << ", " << planetCenter.y << ", " << planetCenter.z
+                  << std::endl;
         std::cout << "  Planet radius: " << planetRadius << ", Atmosphere radius: " << atmosphereRadius << std::endl;
     }
 
@@ -407,22 +434,26 @@ void RenderAtmosphere(const glm::vec3 &cameraPos,
         return;
     }
 
-    // Save current OpenGL state
-    GLboolean depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
-    GLboolean blendEnabled = glIsEnabled(GL_BLEND);
-    GLint currentDepthMask;
-    glGetIntegerv(GL_DEPTH_WRITEMASK, &currentDepthMask);
-    GLint currentBlendSrc, currentBlendDst;
-    glGetIntegerv(GL_BLEND_SRC, &currentBlendSrc);
-    glGetIntegerv(GL_BLEND_DST, &currentBlendDst);
+    // TODO: Migrate atmosphere rendering to Vulkan
+    // Save current OpenGL state (state queries removed - defaults used)
+    GLboolean depthTestEnabled = false; // Default - state queries removed
+    // glIsEnabled(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline state
+    GLboolean blendEnabled = false; // Default
+    // glIsEnabled(GL_BLEND); // REMOVED - migrate to Vulkan pipeline blend state
+    GLint currentDepthMask = 1; // Default - state queries removed
+    // glGetIntegerv(GL_DEPTH_WRITEMASK, &currentDepthMask); // REMOVED - migrate to Vulkan pipeline depth state
+    GLint currentBlendSrc = 0, currentBlendDst = 0; // Defaults
+    // glGetIntegerv(GL_BLEND_SRC, &currentBlendSrc); // REMOVED - migrate to Vulkan pipeline blend state
+    // glGetIntegerv(GL_BLEND_DST, &currentBlendDst); // REMOVED - migrate to Vulkan pipeline blend state
 
     // Enable additive blending for emissive atmospheric scattering
     // This makes the scattered light add to the scene (glowing effect)
     if (g_debugMode == 0)
     {
-        glEnable(GL_BLEND);
+        // TODO: Migrate atmosphere rendering to Vulkan
+        // glEnable(GL_BLEND); // REMOVED - migrate to Vulkan pipeline blend state
         // Additive blending: RGB values add to the scene, alpha controls intensity
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE); // Additive blending for emissive effect
+        // glBlendFunc(GL_SRC_ALPHA, GL_ONE); // REMOVED - migrate to Vulkan pipeline blend state
     }
     else
     {
@@ -430,10 +461,11 @@ void RenderAtmosphere(const glm::vec3 &cameraPos,
         glDisable(GL_BLEND);
     }
 
+    // TODO: Migrate atmosphere rendering to Vulkan
     // Disable depth test and depth write for fullscreen overlay
     // This ensures the atmosphere always renders on top
-    glDisable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE);
+    // glDisable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state (depthTest=false for fullscreen overlay)
+    // glDepthMask(GL_FALSE); // REMOVED - migrate to Vulkan pipeline depth state (depthWrite=false)
 
     // Use atmosphere shader
     glUseProgram(g_shaderProgram);
@@ -444,14 +476,17 @@ void RenderAtmosphere(const glm::vec3 &cameraPos,
         glUniform1f(g_uniformDebugMode, static_cast<float>(g_debugMode));
         if (renderCount % 60 == 0)
         {
-            std::cout << "DEBUG: Setting uDebugMode to " << g_debugMode << " (as float: " << static_cast<float>(g_debugMode) << ", uniform location: " << g_uniformDebugMode << ")" << std::endl;
+            std::cout << "DEBUG: Setting uDebugMode to " << g_debugMode
+                      << " (as float: " << static_cast<float>(g_debugMode)
+                      << ", uniform location: " << g_uniformDebugMode << ")" << std::endl;
         }
     }
     else
     {
         if (renderCount % 60 == 0)
         {
-            std::cout << "DEBUG: WARNING - uDebugMode uniform not found (location: " << g_uniformDebugMode << ")" << std::endl;
+            std::cout << "DEBUG: WARNING - uDebugMode uniform not found (location: " << g_uniformDebugMode << ")"
+                      << std::endl;
         }
     }
 
@@ -495,28 +530,50 @@ void RenderAtmosphere(const glm::vec3 &cameraPos,
             glUniform1i(g_uniformScatteringLUT, 1);
     }
 
-    // Render fullscreen quad
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
+    // Create VAO/VBO on first use (fullscreen quad is already in NDC space, no matrix needed)
+    if (!g_atmosphereVAOCreated)
+    {
+        if (!loadGLExtensions() || glGenVertexArrays == nullptr)
+        {
+            std::cerr << "Atmosphere: VAO functions not available!" << std::endl;
+            return;
+        }
 
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-    
-    glVertexPointer(2, GL_FLOAT, 4 * sizeof(float), g_fullscreenQuad);
-    glTexCoordPointer(2, GL_FLOAT, 4 * sizeof(float), g_fullscreenQuad + 2);
-    
+        glGenVertexArrays(1, &g_atmosphereVAO);
+        glGenBuffers(1, &g_atmosphereVBO);
+        glGenBuffers(1, &g_atmosphereEBO);
+
+        glBindVertexArray(g_atmosphereVAO);
+
+        glBindBuffer(GL_ARRAY_BUFFER, g_atmosphereVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(g_fullscreenQuad), g_fullscreenQuad, GL_STATIC_DRAW);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_atmosphereEBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(g_fullscreenQuadIndices), g_fullscreenQuadIndices, GL_STATIC_DRAW);
+
+        // Position attribute (location 0)
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void *>(0));
+        glEnableVertexAttribArray(0);
+
+        // TexCoord attribute (location 1)
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void *>(2 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        glBindVertexArray(0);
+        g_atmosphereVAOCreated = true;
+    }
+
+    // Render fullscreen quad using VAO
     GLenum error = glGetError();
     if (error != GL_NO_ERROR && renderCount % 60 == 0)
     {
         std::cout << "DEBUG: OpenGL error before draw: " << error << std::endl;
     }
-    
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, g_fullscreenQuadIndices);
-    
+
+    glBindVertexArray(g_atmosphereVAO);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+
     error = glGetError();
     if (error != GL_NO_ERROR)
     {
@@ -526,14 +583,6 @@ void RenderAtmosphere(const glm::vec3 &cameraPos,
     {
         std::cout << "DEBUG: No OpenGL errors, draw completed successfully" << std::endl;
     }
-    
-    glDisableClientState(GL_VERTEX_ARRAY);
-    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
 
     // Restore state
     glUseProgram(0);
@@ -545,29 +594,36 @@ void RenderAtmosphere(const glm::vec3 &cameraPos,
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 
+    // TODO: Migrate atmosphere rendering to Vulkan
     // Restore depth test state
-    if (depthTestEnabled)
-        glEnable(GL_DEPTH_TEST);
-    else
-        glDisable(GL_DEPTH_TEST);
-    glDepthMask(currentDepthMask ? GL_TRUE : GL_FALSE);
+    // In Vulkan, depth state is managed via pipeline selection, not runtime state changes
+    // if (depthTestEnabled)
+    //     glEnable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state
+    // else
+    //     glDisable(GL_DEPTH_TEST); // REMOVED - migrate to Vulkan pipeline depth state
+    // glDepthMask(currentDepthMask ? GL_TRUE : GL_FALSE); // REMOVED - migrate to Vulkan pipeline depth state
 
+    // TODO: Migrate atmosphere rendering to Vulkan
     // Restore blend state (only if we were in normal mode)
+    // State restoration not needed in Vulkan - state managed via pipelines
+    // Both branches are now identical (commented out), but keeping structure for clarity
     if (g_debugMode == 0)
     {
-        if (blendEnabled)
-            glEnable(GL_BLEND);
-        else
-            glDisable(GL_BLEND);
-        glBlendFunc(currentBlendSrc, currentBlendDst);
+        // if (blendEnabled)
+        //     glEnable(GL_BLEND); // REMOVED - migrate to Vulkan pipeline blend state
+        // else
+        //     glDisable(GL_BLEND); // REMOVED - migrate to Vulkan pipeline blend state
+        // glBlendFunc(currentBlendSrc, currentBlendDst); // REMOVED - migrate to Vulkan pipeline blend state
+        (void)0; // Empty statement to satisfy syntax
     }
     else
     {
         // Restore original blend state
-        if (blendEnabled)
-            glEnable(GL_BLEND);
-        else
-            glDisable(GL_BLEND);
-        glBlendFunc(currentBlendSrc, currentBlendDst);
+        // if (blendEnabled)
+        //     glEnable(GL_BLEND); // REMOVED - migrate to Vulkan pipeline blend state
+        // else
+        //     glDisable(GL_BLEND); // REMOVED - migrate to Vulkan pipeline blend state
+        // glBlendFunc(currentBlendSrc, currentBlendDst); // REMOVED - migrate to Vulkan pipeline blend state
+        (void)0; // Empty statement to satisfy syntax
     }
 }
