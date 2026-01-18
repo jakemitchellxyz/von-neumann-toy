@@ -202,4 +202,5 @@ private:
 };
 
 // Convenience macro for accessing InputController
-#define INPUT InputController::instance()
+// Note: Cannot use "INPUT" as it conflicts with Windows winuser.h INPUT type
+#define g_input InputController::instance()

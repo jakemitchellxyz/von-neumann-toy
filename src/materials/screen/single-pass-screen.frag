@@ -2,29 +2,29 @@
 
 // SDF Ray Marching Fragment Shader
 // Optimized sphere tracing with frustum-culled objects
-// Samples skybox cubemap on ray miss
+// Uses native Vulkan cubemaps for hardware-accelerated skybox and Earth texture sampling
 
 layout(location = 0) in vec2 fragUV;
 layout(location = 0) out vec4 fragColor;
 
 // ==================================
-// Skybox Cubemap Texture
+// Skybox Cubemap Texture (Native Vulkan Cubemap)
 // ==================================
-// Stored as vertical strip: 6 faces (faceSize x faceSize each)
-// Face order: +X, -X, +Y, -Y, +Z, -Z (matches Vulkan cubemap convention)
-layout(set = 0, binding = 3) uniform sampler2D skyboxCubemap;
+// Hardware-accelerated cubemap sampling with seamless edge filtering
+// Face order: +X, -X, +Y, -Y, +Z, -Z (Vulkan convention)
+layout(set = 0, binding = 3) uniform samplerCube skyboxCubemap;
 
 // Skybox sampling parameters
 const float SKYBOX_EXPOSURE = 5.0; // HDR exposure multiplier
 
 // ==================================
-// Earth Material Textures (NAIF ID 399)
+// Earth Material Textures (Native Vulkan Cubemaps)
 // ==================================
-// Used when a ray hits Earth in the scene
-layout(set = 0, binding = 4) uniform sampler2D earthColorTexture;       // Monthly Blue Marble color
-layout(set = 0, binding = 5) uniform sampler2D earthNormalTexture;      // Normal map for terrain
-layout(set = 0, binding = 6) uniform sampler2D earthNightlightsTexture; // City lights at night
-layout(set = 0, binding = 7) uniform sampler2D earthSpecularTexture;    // Specular/roughness
+// Hardware-accelerated cubemap sampling for all Earth textures
+layout(set = 0, binding = 4) uniform samplerCube earthColorTexture;       // Monthly Blue Marble color
+layout(set = 0, binding = 5) uniform samplerCube earthNormalTexture;      // Normal map for terrain
+layout(set = 0, binding = 6) uniform samplerCube earthNightlightsTexture; // City lights at night
+layout(set = 0, binding = 7) uniform samplerCube earthSpecularTexture;    // Specular/roughness
 
 // Earth NAIF ID constant
 const int NAIF_EARTH = 399;
@@ -44,6 +44,10 @@ struct CelestialObjectGPU
     float radius;
     vec3 color;
     int naifId;
+    vec3 poleDirection; // From SPICE (display coords)
+    float _padding1;
+    vec3 primeMeridianDirection; // From SPICE (display coords)
+    float _padding2;
 };
 
 layout(std430, set = 0, binding = 2) buffer CelestialObjects
@@ -82,107 +86,6 @@ const int MAX_STEPS = 128;
 const float MAX_DIST = 100000.0;
 const float SURF_DIST = 0.0001;
 const float MIN_STEP = 0.001; // Minimum step to prevent infinite loops
-
-// ==================================
-// Skybox Cubemap Sampling (Vertical Strip Format)
-// ==================================
-// The cubemap is stored as a vertical strip with 6 faces:
-// Face 0: +X (right)   - row 0
-// Face 1: -X (left)    - row 1
-// Face 2: +Y (top)     - row 2
-// Face 3: -Y (bottom)  - row 3
-// Face 4: +Z (front)   - row 4
-// Face 5: -Z (back)    - row 5
-
-// Determine which cubemap face a direction vector hits
-// Returns face index (0-5) and UV coordinates within that face
-void getCubemapFaceUV(vec3 dir, out int face, out vec2 faceUV)
-{
-    vec3 absDir = abs(dir);
-    float maxAxis = max(absDir.x, max(absDir.y, absDir.z));
-    float ma; // Major axis value (for normalization)
-    vec2 uv;
-
-    if (absDir.x >= absDir.y && absDir.x >= absDir.z)
-    {
-        // X is dominant axis
-        ma = absDir.x;
-        if (dir.x > 0.0)
-        {
-            // +X face (right)
-            face = 0;
-            uv = vec2(-dir.z, -dir.y);
-        }
-        else
-        {
-            // -X face (left)
-            face = 1;
-            uv = vec2(dir.z, -dir.y);
-        }
-    }
-    else if (absDir.y >= absDir.x && absDir.y >= absDir.z)
-    {
-        // Y is dominant axis
-        ma = absDir.y;
-        if (dir.y > 0.0)
-        {
-            // +Y face (top)
-            face = 2;
-            uv = vec2(dir.x, dir.z);
-        }
-        else
-        {
-            // -Y face (bottom)
-            face = 3;
-            uv = vec2(dir.x, -dir.z);
-        }
-    }
-    else
-    {
-        // Z is dominant axis
-        ma = absDir.z;
-        if (dir.z > 0.0)
-        {
-            // +Z face (front)
-            face = 4;
-            uv = vec2(dir.x, -dir.y);
-        }
-        else
-        {
-            // -Z face (back)
-            face = 5;
-            uv = vec2(-dir.x, -dir.y);
-        }
-    }
-
-    // Normalize UV to [-1, 1] then convert to [0, 1]
-    faceUV = (uv / ma) * 0.5 + 0.5;
-}
-
-// Sample the cubemap vertical strip texture using a 3D direction
-vec3 sampleCubemapStrip(sampler2D cubemapTex, vec3 direction)
-{
-    int face;
-    vec2 faceUV;
-    getCubemapFaceUV(normalize(direction), face, faceUV);
-
-    // The texture is arranged as a vertical strip with 6 faces
-    // Each face occupies 1/6 of the texture height
-    // Face 0 is at the top (v = 0 to 1/6), face 5 is at the bottom (v = 5/6 to 1)
-    float faceHeight = 1.0 / 6.0;
-    float v = float(face) * faceHeight + faceUV.y * faceHeight;
-
-    // U coordinate is just the face UV x
-    vec2 texCoord = vec2(faceUV.x, v);
-
-    // Sample the texture
-    vec3 color = texture(cubemapTex, texCoord).rgb;
-
-    // Apply HDR exposure
-    color *= SKYBOX_EXPOSURE;
-
-    return color;
-}
 
 // ==================================
 // SDF Primitives
@@ -291,40 +194,74 @@ vec3 getRayDirection(vec2 uv, float fovDegrees, float aspectRatio)
 }
 
 // ==================================
-// Earth Material Rendering
+// Body Frame Utilities (using SPICE data from SSBO)
 // ==================================
-// Calculate UV coordinates from a point on Earth's sphere
-// Uses equirectangular projection (latitude/longitude)
-// Assumes Y is up (north pole), X-Z plane is equator
-vec2 sphereToEquirectangularUV(vec3 surfaceNormal)
+
+// Build rotation matrix from SPICE-derived pole and prime meridian directions
+// This transforms from world space to body-fixed coordinates
+mat3 buildBodyFrame(vec3 poleDir, vec3 primeMeridianDir)
 {
-    // Convert surface normal to latitude/longitude
-    // Latitude: angle from equator (-90 to 90 degrees) -> V coordinate (0 to 1)
-    // Longitude: angle around Y axis (-180 to 180 degrees) -> U coordinate (0 to 1)
+    // Pole direction is the Z-axis of the body-fixed frame (north pole)
+    vec3 north = normalize(poleDir);
 
-    float latitude = asin(clamp(surfaceNormal.y, -1.0, 1.0)); // -PI/2 to PI/2
-    float longitude = atan(surfaceNormal.x, surfaceNormal.z); // -PI to PI
+    // Prime meridian direction should be perpendicular to pole
+    // Project it onto the equatorial plane and normalize
+    vec3 east = primeMeridianDir - dot(primeMeridianDir, north) * north;
+    float eastLen = length(east);
+    if (eastLen < 0.001)
+    {
+        // Fallback if prime meridian is too close to pole
+        if (abs(north.y) < 0.9)
+        {
+            east = normalize(cross(north, vec3(0.0, 1.0, 0.0)));
+        }
+        else
+        {
+            east = normalize(cross(north, vec3(1.0, 0.0, 0.0)));
+        }
+    }
+    else
+    {
+        east = east / eastLen;
+    }
 
-    // Convert to UV coordinates
-    // V: 0 = south pole (-90°), 1 = north pole (+90°)
-    float v = 1.0 - (latitude / 3.14159265359 + 0.5); // Flip V so north is at top of texture
-    // U: 0 = -180° (west), 1 = +180° (east)
-    float u = longitude / (2.0 * 3.14159265359) + 0.5;
+    // Complete the right-handed coordinate system
+    vec3 south90 = cross(north, east);
 
-    return vec2(u, v);
+    // Build rotation matrix (columns are body-frame axes in world coordinates)
+    // To transform world -> body, we need the transpose (inverse of orthonormal)
+    return mat3(east, south90, north);
 }
 
+// ==================================
+// Earth Material Rendering (Native Cubemap)
+// ==================================
+// Uses hardware-accelerated cubemap sampling for all Earth textures
+// Uses SPICE-derived pole and prime meridian from SSBO
+
 // Sample Earth material and compute final color
-vec3 sampleEarthMaterial(vec3 hitPoint, vec3 surfaceNormal, vec3 toSun)
+vec3 sampleEarthMaterial(vec3 hitPoint, vec3 surfaceNormal, vec3 toSun, vec3 poleDir, vec3 primeMeridianDir)
 {
-    // Get UV coordinates from surface normal
-    vec2 uv = sphereToEquirectangularUV(surfaceNormal);
+    // Build body-fixed frame from SPICE data (J2000: Z-up, X toward prime meridian)
+    mat3 bodyFrame = buildBodyFrame(poleDir, primeMeridianDir);
 
-    // Sample base color texture
-    vec3 baseColor = texture(earthColorTexture, uv).rgb;
+    // Transform surface normal to body-fixed J2000 coordinates
+    // In body-fixed J2000: Z = north pole, X = prime meridian, Y = 90°E
+    vec3 bodyDir = transpose(bodyFrame) * surfaceNormal;
 
-    // Sample normal map (if available)
-    vec3 normalSample = texture(earthNormalTexture, uv).rgb;
+    // Transform from body-fixed J2000 (Z-up) to cubemap convention (Y-up)
+    // The cubemap textures are baked with:
+    // - +Y is north pole
+    // - +X is prime meridian (0° longitude)
+    // - +Z is 90°W longitude
+    // Transform: cubemap.x = body.x, cubemap.y = body.z, cubemap.z = -body.y
+    vec3 dir = vec3(bodyDir.x, bodyDir.z, -bodyDir.y);
+
+    // Sample base color texture (native cubemap - hardware accelerated)
+    vec3 baseColor = texture(earthColorTexture, dir).rgb;
+
+    // Sample normal map (native cubemap)
+    vec3 normalSample = texture(earthNormalTexture, dir).rgb;
     vec3 tangentNormal = normalSample * 2.0 - 1.0;
 
     // Build tangent space basis from surface normal
@@ -357,12 +294,12 @@ vec3 sampleEarthMaterial(vec3 hitPoint, vec3 surfaceNormal, vec3 toSun)
     // Calculate daylight/nightside factor
     float dayFactor = clamp(dot(surfaceNormal, toSun) * 2.0 + 0.5, 0.0, 1.0);
 
-    // Sample nightlights for the dark side
-    float nightlights = texture(earthNightlightsTexture, uv).r;
+    // Sample nightlights for the dark side (native cubemap)
+    float nightlights = texture(earthNightlightsTexture, dir).r;
     vec3 nightlightColor = vec3(1.0, 0.9, 0.7) * nightlights * 2.0; // Warm city light color
 
-    // Sample specular map for ocean reflections
-    float specularMask = texture(earthSpecularTexture, uv).r;
+    // Sample specular map for ocean reflections (native cubemap)
+    float specularMask = texture(earthSpecularTexture, dir).r;
 
     // Calculate specular reflection (simplified Blinn-Phong)
     vec3 viewDir = normalize(pc.cameraPosition - hitPoint);
@@ -397,7 +334,8 @@ void main()
     // Early out if no objects to render - just show skybox
     if (celestialData.objectCount == 0u)
     {
-        vec3 skyColor = sampleCubemapStrip(skyboxCubemap, rd);
+        // Native cubemap sampling with HDR exposure
+        vec3 skyColor = texture(skyboxCubemap, rd).rgb * SKYBOX_EXPOSURE;
         fragColor = vec4(skyColor, 1.0);
         gl_FragDepth = 1.0;
         return;
@@ -426,13 +364,18 @@ void main()
         else if (hitID == NAIF_EARTH)
         {
             // Earth: use advanced material with textures
-            // Find Earth's center from celestial objects
+            // Find Earth's data from celestial objects SSBO
             vec3 earthCenter = vec3(0.0);
+            vec3 earthPoleDir = vec3(0.0, 0.0, 1.0);       // J2000: Z-up
+            vec3 earthPrimeMeridian = vec3(1.0, 0.0, 0.0); // J2000: X toward vernal equinox
+
             for (uint i = 0u; i < celestialData.objectCount && i < 32u; ++i)
             {
                 if (celestialData.objects[i].naifId == NAIF_EARTH)
                 {
                     earthCenter = celestialData.objects[i].position;
+                    earthPoleDir = celestialData.objects[i].poleDirection;
+                    earthPrimeMeridian = celestialData.objects[i].primeMeridianDirection;
                     break;
                 }
             }
@@ -440,8 +383,9 @@ void main()
             // Calculate surface normal relative to Earth's center
             vec3 surfaceNormal = normalize(p - earthCenter);
 
-            // Sample Earth material textures
-            color = sampleEarthMaterial(p, surfaceNormal, toSun);
+            // Sample Earth material textures using native cubemaps
+            // Pole and prime meridian come directly from SPICE via SSBO
+            color = sampleEarthMaterial(p, surfaceNormal, toSun, earthPoleDir, earthPrimeMeridian);
         }
         else
         {
@@ -455,9 +399,8 @@ void main()
     }
     else
     {
-        // Ray miss: sample skybox cubemap using ray direction
-        // The skybox is centered on J2000 epoch coordinate system
-        color = sampleCubemapStrip(skyboxCubemap, rd);
+        // Ray miss: sample skybox using native cubemap with HDR exposure
+        color = texture(skyboxCubemap, rd).rgb * SKYBOX_EXPOSURE;
         depth = 1.0;
     }
 

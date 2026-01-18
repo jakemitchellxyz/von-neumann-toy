@@ -1,4 +1,5 @@
 #include "../../../concerns/constants.h"
+#include "../../helpers/cubemap-conversion.h"
 #include "../earth-material.h"
 
 #include <array>
@@ -305,108 +306,43 @@ bool EarthMaterial::combineTilesForMonth(int month,
     }
 
     // =========================================================================
-    // Step 2: Convert equirectangular to sinusoidal projection (orange peel)
+    // Step 2: Convert equirectangular to cubemap (vertical strip)
     // =========================================================================
-    // Sinusoidal projection: x = longitude * cos(latitude), y = latitude
-    // Creates characteristic S-curved edges where valid data width = cos(lat)
+    // Cubemap provides uniform sampling density and seamless rendering at all angles
+    // Format: Vertical strip with 6 faces (+X, -X, +Y, -Y, +Z, -Z)
 
-    std::vector<unsigned char> sinusoidal;
-    try
+    int faceSize = calculateCubemapFaceSize(outWidth, outHeight);
+    unsigned char *cubemapData =
+        convertEquirectangularToCubemapUChar(equirect.data(), outWidth, outHeight, channels, faceSize);
+
+    if (!cubemapData)
     {
-        sinusoidal.resize(static_cast<size_t>(outWidth) * outHeight * channels, 0);
-    }
-    catch (const std::bad_alloc &)
-    {
-        std::cerr << "Failed to allocate sinusoidal buffer" << '\n';
+        std::cerr << "Failed to convert equirectangular to cubemap" << '\n';
         return false;
     }
 
-    for (int y = 0; y < outHeight; y++)
-    {
-        // v in [0, 1], top to bottom
-        float v = static_cast<float>(y) / (outHeight - 1);
-
-        // Latitude: v=0 → lat=π/2 (north pole), v=1 → lat=-π/2 (south pole)
-        float lat = (0.5f - v) * static_cast<float>(PI);
-        float cosLat = std::cos(lat);
-
-        // Valid x range in sinusoidal: [-π*cos(lat), π*cos(lat)]
-        // In UV: [0.5 - 0.5*cos(lat), 0.5 + 0.5*cos(lat)]
-        float uMin = 0.5f - 0.5f * std::abs(cosLat);
-        float uMax = 0.5f + 0.5f * std::abs(cosLat);
-
-        for (int x = 0; x < outWidth; x++)
-        {
-            // u in [0, 1], left to right
-            float u = static_cast<float>(x) / (outWidth - 1);
-
-            int dstIdx = (y * outWidth + x) * channels;
-
-            // Check if this pixel is within valid sinusoidal bounds
-            if (u < uMin || u > uMax)
-            {
-                // Outside valid region - black pixel
-                sinusoidal[dstIdx + 0] = 0;
-                sinusoidal[dstIdx + 1] = 0;
-                sinusoidal[dstIdx + 2] = 0;
-                continue;
-            }
-
-            // Inverse sinusoidal: find longitude from sinusoidal x
-            // x_sinu = (u - 0.5) * 2π, then lon = x_sinu / cos(lat)
-            float x_sinu = (u - 0.5f) * 2.0f * static_cast<float>(PI);
-            float lon = (std::abs(cosLat) > 0.001f) ? (x_sinu / cosLat) : 0.0f;
-
-            // Convert longitude to equirectangular u
-            float u_equirect = lon / (2.0f * static_cast<float>(PI)) + 0.5f;
-            float v_equirect = v; // Same latitude mapping
-
-            // Clamp to valid range
-            u_equirect = std::max(0.0f, std::min(1.0f, u_equirect));
-            v_equirect = std::max(0.0f, std::min(1.0f, v_equirect));
-
-            // Bilinear sample from equirectangular buffer
-            float srcX = u_equirect * (outWidth - 1);
-            float srcY = v_equirect * (outHeight - 1);
-
-            int x0 = static_cast<int>(srcX);
-            int y0 = static_cast<int>(srcY);
-            int x1 = std::min(x0 + 1, outWidth - 1);
-            int y1 = std::min(y0 + 1, outHeight - 1);
-
-            float fx = srcX - x0;
-            float fy = srcY - y0;
-
-            for (int c = 0; c < channels; c++)
-            {
-                float p00 = equirect[(y0 * outWidth + x0) * channels + c];
-                float p10 = equirect[(y0 * outWidth + x1) * channels + c];
-                float p01 = equirect[(y1 * outWidth + x0) * channels + c];
-                float p11 = equirect[(y1 * outWidth + x1) * channels + c];
-
-                float top = p00 * (1 - fx) + p10 * fx;
-                float bottom = p01 * (1 - fx) + p11 * fx;
-                float value = top * (1 - fy) + bottom * fy;
-
-                sinusoidal[dstIdx + c] = static_cast<unsigned char>(value);
-            }
-        }
-    }
-
     // =========================================================================
-    // Step 3: Save sinusoidal image
+    // Step 3: Save cubemap as vertical strip image
     // =========================================================================
+    int cubemapWidth, cubemapHeight;
+    getCubemapStripDimensions(faceSize, cubemapWidth, cubemapHeight);
+
     int result;
     if (lossless)
     {
-        result =
-            stbi_write_png(outputPath.c_str(), outWidth, outHeight, channels, sinusoidal.data(), outWidth * channels);
+        result = stbi_write_png(outputPath.c_str(),
+                                cubemapWidth,
+                                cubemapHeight,
+                                channels,
+                                cubemapData,
+                                cubemapWidth * channels);
     }
     else
     {
-        result = stbi_write_jpg(outputPath.c_str(), outWidth, outHeight, channels, sinusoidal.data(), 95);
+        result = stbi_write_jpg(outputPath.c_str(), cubemapWidth, cubemapHeight, channels, cubemapData, 95);
     }
 
+    delete[] cubemapData;
     return result != 0;
 }
 

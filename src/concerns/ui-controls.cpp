@@ -104,11 +104,11 @@ bool DrawSlider(float x,
     // Set cursor based on state
     if (isDragging)
     {
-        INPUT.setCursor(CursorType::Grabbing);
+        g_input.setCursor(CursorType::Grabbing);
     }
     else if (isHoveringThumb || isInTrack)
     {
-        INPUT.setCursor(CursorType::Hand);
+        g_input.setCursor(CursorType::Hand);
     }
 
     if (mouseDown && (isDragging || isInTrack))
@@ -187,11 +187,11 @@ bool DrawLinearSlider(float x,
     // Set cursor based on state
     if (isDragging)
     {
-        INPUT.setCursor(CursorType::Grabbing);
+        g_input.setCursor(CursorType::Grabbing);
     }
     else if (isHoveringThumb || isInTrack)
     {
-        INPUT.setCursor(CursorType::Hand);
+        g_input.setCursor(CursorType::Hand);
     }
 
     if (mouseDown && (isDragging || isInTrack))
@@ -255,7 +255,7 @@ bool DrawCheckbox(float x,
     // Set pointer cursor when hovering
     if (isHovering)
     {
-        INPUT.setCursor(CursorType::Pointer);
+        g_input.setCursor(CursorType::Pointer);
     }
 
     // Checkbox box background
@@ -335,7 +335,7 @@ bool DrawButton(float x,
     // Set pointer cursor when hovering
     if (isHovering)
     {
-        INPUT.setCursor(CursorType::Pointer);
+        g_input.setCursor(CursorType::Pointer);
     }
 
     // Button background
@@ -378,7 +378,7 @@ bool DrawAccordionHeader(float x,
     // Set pointer cursor when hovering
     if (isHovering)
     {
-        INPUT.setCursor(CursorType::Pointer);
+        g_input.setCursor(CursorType::Pointer);
     }
 
     // Draw arrow

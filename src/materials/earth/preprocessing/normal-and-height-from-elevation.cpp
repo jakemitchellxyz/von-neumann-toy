@@ -1,4 +1,5 @@
 #include "../../../concerns/constants.h"
+#include "../../helpers/cubemap-conversion.h"
 #include "../earth-material.h"
 
 
@@ -594,13 +595,13 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     // Create output directory
     std::filesystem::create_directories(outputPath);
 
-    // Output files (sinusoidal projection only)
+    // Output files (cubemap vertical strip format)
     std::string heightmapPath = outputPath + "/earth_landmass_heightmap.png";
     std::string normalMapPath = outputPath + "/earth_landmass_normal.png";
 
     // Print absolute paths for debugging
-    std::cout << "Heightmap will be: " << std::filesystem::absolute(heightmapPath).string() << " (sinusoidal)" << '\n';
-    std::cout << "Normalmap will be: " << std::filesystem::absolute(normalMapPath).string() << " (sinusoidal)" << '\n';
+    std::cout << "Heightmap will be: " << std::filesystem::absolute(heightmapPath).string() << " (cubemap)" << '\n';
+    std::cout << "Normalmap will be: " << std::filesystem::absolute(normalMapPath).string() << " (cubemap)" << '\n';
 
     if (std::filesystem::exists(heightmapPath) && std::filesystem::exists(normalMapPath))
     {
@@ -679,81 +680,19 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     elevation = nullptr;
 
     // =========================================================================
-    // Convert to Sinusoidal Projection (orange peel layout)
+    // Generate Normal Map from Equirectangular Heightmap
     // =========================================================================
-    std::cout << "Converting heightmap to sinusoidal projection..." << '\n';
+    std::cout << "Generating normal map from equirectangular heightmap..." << '\n';
 
-    std::vector<unsigned char> heightmapSinu(outWidth * outHeight, 0);
-
-    for (int y = 0; y < outHeight; y++)
-    {
-        float v = static_cast<float>(y) / (outHeight - 1);
-        float lat = (0.5f - v) * static_cast<float>(PI);
-        float cosLat = std::cos(lat);
-
-        // Valid x range for this latitude in sinusoidal
-        float uMin = 0.5f - 0.5f * std::abs(cosLat);
-        float uMax = 0.5f + 0.5f * std::abs(cosLat);
-
-        for (int x = 0; x < outWidth; x++)
-        {
-            float u_sinu = static_cast<float>(x) / (outWidth - 1);
-            int dstIdx = y * outWidth + x;
-
-            // Check if within valid sinusoidal bounds
-            if (u_sinu < uMin || u_sinu > uMax)
-            {
-                // Outside valid region - black for heightmap
-                heightmapSinu[dstIdx] = 0;
-                continue;
-            }
-
-            // Inverse sinusoidal to get equirectangular UV
-            float x_sinu = (u_sinu - 0.5f) * 2.0f * static_cast<float>(PI);
-            float lon = (std::abs(cosLat) > 0.001f) ? (x_sinu / cosLat) : 0.0f;
-
-            float u_equirect = lon / (2.0f * static_cast<float>(PI)) + 0.5f;
-            float v_equirect = v;
-
-            // Clamp
-            u_equirect = std::max(0.0f, std::min(1.0f, u_equirect));
-
-            // Bilinear sample from equirectangular
-            float srcX = u_equirect * (outWidth - 1);
-            float srcY = v_equirect * (outHeight - 1);
-
-            int x0 = static_cast<int>(srcX);
-            int y0 = static_cast<int>(srcY);
-            int x1 = std::min(x0 + 1, outWidth - 1);
-            int y1 = std::min(y0 + 1, outHeight - 1);
-
-            float fx = srcX - x0;
-            float fy = srcY - y0;
-
-            // Heightmap (1 channel)
-            float h00 = heightmapEquirect[y0 * outWidth + x0];
-            float h10 = heightmapEquirect[y0 * outWidth + x1];
-            float h01 = heightmapEquirect[y1 * outWidth + x0];
-            float h11 = heightmapEquirect[y1 * outWidth + x1];
-            float hVal = h00 * (1 - fx) * (1 - fy) + h10 * fx * (1 - fy) + h01 * (1 - fx) * fy + h11 * fx * fy;
-            heightmapSinu[dstIdx] = static_cast<unsigned char>(hVal);
-        }
-    }
-
-    // Free equirectangular heightmap (no longer needed)
-    delete[] heightmapEquirect;
-
-    // =========================================================================
-    // Generate Normal Map directly in Sinusoidal Space
-    // =========================================================================
-    // CRITICAL: Generate normals directly from sinusoidal heightmap
-    // This ensures U and V directions correctly map to east-west and north-south
-    // when wrapped around the sphere
-    std::cout << "Generating normal map directly in sinusoidal space..." << '\n';
-
-    std::vector<unsigned char> normalMapSinu(outWidth * outHeight * 3, 0);
     float heightScale = 50.0f;
-    generateNormalMapSinusoidal(heightmapSinu.data(), normalMapSinu.data(), outWidth, outHeight, heightScale);
+    unsigned char *normalMapEquirect = generateNormalMap(heightmapEquirect, outWidth, outHeight, heightScale);
+    if (!normalMapEquirect)
+    {
+        delete[] heightmapEquirect;
+        std::cout << "Failed to generate normal map" << '\n';
+        std::cout << "===================================" << '\n';
+        return false;
+    }
 
     // =========================================================================
     // Create Bathymetry Maps (Ocean Floor Depth and Normals)
@@ -776,12 +715,11 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     std::vector<unsigned char> originalHeightmap(outWidth * outHeight);
     for (int i = 0; i < outWidth * outHeight; i++)
     {
-        originalHeightmap[i] = heightmapSinu[i];
+        originalHeightmap[i] = heightmapEquirect[i];
     }
 
-    // Create bathymetry buffers (copy of current sinusoidal data)
-    std::vector<unsigned char> bathymetryHeight(outWidth * outHeight,
-                                                128); // Sea level default
+    // Create bathymetry buffers (in equirectangular)
+    std::vector<unsigned char> bathymetryHeight(outWidth * outHeight, 128); // Sea level default
     std::vector<unsigned char> bathymetryNormal(outWidth * outHeight * 3);
 
     // Initialize normals to flat (pointing up)
@@ -796,9 +734,7 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     // Apply landmass mask to flatten ocean areas (terrain) AND extract bathymetry
     // =========================================================================
     // Load landmass mask file (white=land, black=ocean) to detect oceans
-    // Terrain: Ocean areas get heightmap=128 (sea level), normal=(0.5, 0.5, 1)
-    // (flat up) Bathymetry: Land areas get heightmap=128 (sea level), ocean keeps
-    // raw depth
+    // Note: The landmass mask may be in cubemap format, so we sample it accordingly
 
     std::cout << "Applying landmass mask and generating bathymetry..." << '\n';
 
@@ -810,21 +746,30 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
         if (!preprocessLandmassMask(defaultsPath, outputBasePath, resolution))
         {
             std::cout << "  ERROR: Failed to generate landmass mask" << '\n';
+            delete[] heightmapEquirect;
+            delete[] normalMapEquirect;
             return false;
         }
     }
 
-    // Load the landmass mask
+    // Load the landmass mask (will be cubemap format after preprocessing)
     int maskW, maskH, maskC;
     unsigned char *maskData = stbi_load(landmaskPath.c_str(), &maskW, &maskH, &maskC, 1);
 
     if (!maskData)
     {
         std::cout << "  ERROR: Failed to load landmass mask: " << landmaskPath << '\n';
+        delete[] heightmapEquirect;
+        delete[] normalMapEquirect;
         return false;
     }
 
-    std::cout << "  Loaded landmass mask: " << maskW << "x" << maskH << " (sinusoidal)" << '\n';
+    // Determine if mask is cubemap (height = 6 * width) or equirectangular (height = width / 2)
+    bool maskIsCubemap = isCubemapGridDimensions(maskW, maskH);
+    int maskFaceSize = maskIsCubemap ? getFaceSizeFromGridDimensions(maskW, maskH) : 0;
+
+    std::cout << "  Loaded landmass mask: " << maskW << "x" << maskH
+              << (maskIsCubemap ? " (cubemap)" : " (equirectangular/sinusoidal)") << '\n';
 
     int oceanPixels = 0;
     int landPixels = 0;
@@ -837,13 +782,28 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     {
         for (int x = 0; x < outWidth; x++)
         {
-            // Sample from mask (same sinusoidal space)
-            int mx = static_cast<int>(static_cast<float>(x) / (outWidth - 1) * (maskW - 1));
-            int my = static_cast<int>(static_cast<float>(y) / (outHeight - 1) * (maskH - 1));
-            mx = std::min(mx, maskW - 1);
-            my = std::min(my, maskH - 1);
+            unsigned char maskVal = 255; // Default to land
 
-            unsigned char maskVal = maskData[my * maskW + mx];
+            if (maskIsCubemap)
+            {
+                // Convert equirectangular UV to direction, then sample cubemap mask
+                float u = static_cast<float>(x) / (outWidth - 1);
+                float v = static_cast<float>(y) / (outHeight - 1);
+                float dirX, dirY, dirZ;
+                equirectangularUVToDirection(u, v, dirX, dirY, dirZ);
+
+                // Sample cubemap mask using the direction
+                sampleCubemapStripUChar(maskData, maskFaceSize, 1, dirX, dirY, dirZ, &maskVal);
+            }
+            else
+            {
+                // Sample from mask (sinusoidal or equirectangular space)
+                int mx = static_cast<int>(static_cast<float>(x) / (outWidth - 1) * (maskW - 1));
+                int my = static_cast<int>(static_cast<float>(y) / (outHeight - 1) * (maskH - 1));
+                mx = std::min(mx, maskW - 1);
+                my = std::min(my, maskH - 1);
+                maskVal = maskData[my * maskW + mx];
+            }
 
             // Mask: 0 = ocean (black), 255 = land (white)
             bool isWater = (maskVal == 0);
@@ -854,7 +814,7 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
             if (isWater)
             {
                 oceanPixels++;
-                float depth = heightmapSinu[dstIdx];
+                float depth = heightmapEquirect[dstIdx];
                 minOceanDepth = std::min(minOceanDepth, depth);
                 maxOceanDepth = std::max(maxOceanDepth, depth);
             }
@@ -870,7 +830,7 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     std::cout << "  Ocean pixels: " << oceanPixels << ", Land pixels: " << landPixels << '\n';
     std::cout << "  Raw depth range: " << minOceanDepth << " - " << maxOceanDepth << '\n';
 
-    // Second pass: create terrain and bathymetry maps
+    // Second pass: create terrain and bathymetry maps in equirectangular
     for (int y = 0; y < outHeight; y++)
     {
         for (int x = 0; x < outWidth; x++)
@@ -880,41 +840,31 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
             if (isOcean[dstIdx])
             {
                 // === BATHYMETRY: Keep raw ocean floor data ===
-                // Raw heightmap value: lower = deeper ocean
-                // Sea level is approximately 128 in ETOPO normalized data
-                // Values < 128 = below sea level (ocean floor)
+                unsigned char rawHeight = heightmapEquirect[dstIdx];
 
-                unsigned char rawHeight = heightmapSinu[dstIdx];
-
-                // Invert and normalize depth for shader:
-                // 0 = sea level (shallow), 255 = max depth (deepest trenches)
-                // This maps below-sea-level (0-127) to depth (0-255)
+                // Invert and normalize depth for shader
                 float normalizedDepth = 0.0f;
                 if (rawHeight < 128)
                 {
-                    // Below sea level - compute depth
-                    // rawHeight=0 → deepest, rawHeight=127 → just below surface
-                    normalizedDepth = (128.0f - rawHeight) / 128.0f; // 0-1 range
+                    normalizedDepth = (128.0f - rawHeight) / 128.0f;
                 }
                 bathymetryHeight[dstIdx] = static_cast<unsigned char>(normalizedDepth * 255.0f);
 
-                // Bathymetry normal will be generated from bathymetry heightmap
-                // below Keep raw normal data for now (will be overwritten)
-                bathymetryNormal[dstIdx * 3 + 0] = normalMapSinu[dstIdx * 3 + 0];
-                bathymetryNormal[dstIdx * 3 + 1] = normalMapSinu[dstIdx * 3 + 1];
-                bathymetryNormal[dstIdx * 3 + 2] = normalMapSinu[dstIdx * 3 + 2];
+                // Copy raw normal data
+                bathymetryNormal[dstIdx * 3 + 0] = normalMapEquirect[dstIdx * 3 + 0];
+                bathymetryNormal[dstIdx * 3 + 1] = normalMapEquirect[dstIdx * 3 + 1];
+                bathymetryNormal[dstIdx * 3 + 2] = normalMapEquirect[dstIdx * 3 + 2];
 
                 // === TERRAIN: Flatten ocean to sea level ===
-                heightmapSinu[dstIdx] = 128;         // Sea level
-                normalMapSinu[dstIdx * 3 + 0] = 128; // X = 0
-                normalMapSinu[dstIdx * 3 + 1] = 128; // Y = 0
-                normalMapSinu[dstIdx * 3 + 2] = 255; // Z = 1 (up)
+                heightmapEquirect[dstIdx] = 128;
+                normalMapEquirect[dstIdx * 3 + 0] = 128;
+                normalMapEquirect[dstIdx * 3 + 1] = 128;
+                normalMapEquirect[dstIdx * 3 + 2] = 255;
             }
             else
             {
                 // === BATHYMETRY: Land areas masked to sea level ===
-                bathymetryHeight[dstIdx] = 0; // 0 depth (no water)
-                                              // Normal already initialized to flat
+                bathymetryHeight[dstIdx] = 0;
             }
         }
     }
@@ -925,99 +875,134 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     // =========================================================================
     // Generate Bathymetry Normal Map from Bathymetry Heightmap
     // =========================================================================
-    // CRITICAL: Generate normals directly in sinusoidal space
-    // This ensures U and V directions correctly map to east-west and north-south
-    // when wrapped around the sphere
-    // Normals point UPWARD (toward surface) for correct subsurface scattering
-    // Land areas remain flat (already initialized)
+    std::cout << "Generating bathymetry normal map..." << '\n';
 
-    std::cout << "Generating bathymetry normal map directly in sinusoidal space..." << '\n';
-
-    const float bathymetryHeightScale = 11000.0f / 255.0f; // Max depth ~11km, normalized to 0-255
-
-    // Generate normals directly from sinusoidal bathymetry heightmap
-    // This function accounts for sinusoidal projection distortion
-    generateNormalMapSinusoidal(bathymetryHeight.data(),
-                                bathymetryNormal.data(),
-                                outWidth,
-                                outHeight,
-                                bathymetryHeightScale);
-
-    // Overwrite land areas with flat normals (ocean areas already computed correctly)
-    for (int y = 0; y < outHeight; y++)
+    const float bathymetryHeightScale = 11000.0f / 255.0f;
+    unsigned char *bathymetryNormalTemp = generateNormalMap(bathymetryHeight.data(), outWidth, outHeight, bathymetryHeightScale);
+    if (bathymetryNormalTemp)
     {
-        for (int x = 0; x < outWidth; x++)
+        // Overwrite land areas with flat normals
+        for (int y = 0; y < outHeight; y++)
         {
-            int dstIdx = y * outWidth + x;
-            if (!isOcean[dstIdx])
+            for (int x = 0; x < outWidth; x++)
             {
-                // Land areas: flat normal pointing up
-                bathymetryNormal[dstIdx * 3 + 0] = 128; // X = 0
-                bathymetryNormal[dstIdx * 3 + 1] = 128; // Y = 0
-                bathymetryNormal[dstIdx * 3 + 2] = 255; // Z = 1 (up)
+                int dstIdx = y * outWidth + x;
+                if (!isOcean[dstIdx])
+                {
+                    bathymetryNormalTemp[dstIdx * 3 + 0] = 128;
+                    bathymetryNormalTemp[dstIdx * 3 + 1] = 128;
+                    bathymetryNormalTemp[dstIdx * 3 + 2] = 255;
+                }
             }
         }
-    }
-
-    // Save bathymetry heightmap (ocean floor depth)
-    std::cout << "Saving bathymetry depth: " << bathymetryHeightPath << '\n';
-    if (!stbi_write_png(bathymetryHeightPath.c_str(), outWidth, outHeight, 1, bathymetryHeight.data(), outWidth))
-    {
-        std::cerr << "  WARNING: Failed to save bathymetry heightmap" << '\n';
-    }
-
-    // Save bathymetry normal map (ocean floor terrain, normals point upward)
-    std::cout << "Saving bathymetry normal: " << bathymetryNormalPath << '\n';
-    if (!stbi_write_png(bathymetryNormalPath.c_str(), outWidth, outHeight, 3, bathymetryNormal.data(), outWidth * 3))
-    {
-        std::cerr << "  WARNING: Failed to save bathymetry normal map" << '\n';
+        memcpy(bathymetryNormal.data(), bathymetryNormalTemp, outWidth * outHeight * 3);
+        delete[] bathymetryNormalTemp;
     }
 
     // =========================================================================
     // Generate Combined Normal Map (Landmass + Bathymetry) for Shadows
     // =========================================================================
-    // CRITICAL: Generate normals from original heightmap (no masking)
-    // This preserves relative curves between land and ocean floor
-    // The original heightmap already contains both landmass elevation and ocean floor depth
-    // Used for casting shadows on ocean floor from both landmass and ocean features
     std::cout << "Generating combined normal map (landmass + bathymetry) for shadows..." << '\n';
 
-    // Generate combined normal map directly from original heightmap
-    // The original heightmap (before masking) contains:
-    // - Land areas: elevation above sea level (128-255, where 128 = sea level)
-    // - Ocean areas: depth below sea level (0-127, where 128 = sea level)
-    // This preserves the relative curves between land and ocean floor
-    std::vector<unsigned char> combinedNormalMap(outWidth * outHeight * 3, 0);
-    float combinedHeightScale = 50.0f; // Same as landmass heightmap
-    generateNormalMapSinusoidal(originalHeightmap.data(),
-                                combinedNormalMap.data(),
-                                outWidth,
-                                outHeight,
-                                combinedHeightScale);
+    float combinedHeightScale = 50.0f;
+    unsigned char *combinedNormalMap = generateNormalMap(originalHeightmap.data(), outWidth, outHeight, combinedHeightScale);
 
-    // Save combined normal map
-    std::cout << "Saving combined normal map: " << combinedNormalPath << '\n';
-    if (!stbi_write_png(combinedNormalPath.c_str(), outWidth, outHeight, 3, combinedNormalMap.data(), outWidth * 3))
+    // =========================================================================
+    // Convert all textures to cubemap format
+    // =========================================================================
+    std::cout << "Converting all textures to cubemap format..." << '\n';
+
+    int faceSize = calculateCubemapFaceSize(outWidth, outHeight);
+    int cubemapWidth, cubemapHeight;
+    getCubemapStripDimensions(faceSize, cubemapWidth, cubemapHeight);
+
+    // Convert heightmap to cubemap
+    unsigned char *heightmapCubemap = convertEquirectangularToCubemapUChar(heightmapEquirect, outWidth, outHeight, 1, faceSize);
+    delete[] heightmapEquirect;
+
+    // Convert normal map to cubemap
+    unsigned char *normalMapCubemap = convertEquirectangularToCubemapUChar(normalMapEquirect, outWidth, outHeight, 3, faceSize);
+    delete[] normalMapEquirect;
+
+    // Convert bathymetry heightmap to cubemap
+    unsigned char *bathymetryCubemap = convertEquirectangularToCubemapUChar(bathymetryHeight.data(), outWidth, outHeight, 1, faceSize);
+
+    // Convert bathymetry normal map to cubemap
+    unsigned char *bathymetryNormalCubemap = convertEquirectangularToCubemapUChar(bathymetryNormal.data(), outWidth, outHeight, 3, faceSize);
+
+    // Convert combined normal map to cubemap
+    unsigned char *combinedNormalCubemap = nullptr;
+    if (combinedNormalMap)
     {
-        std::cerr << "  WARNING: Failed to save combined normal map" << '\n';
+        combinedNormalCubemap = convertEquirectangularToCubemapUChar(combinedNormalMap, outWidth, outHeight, 3, faceSize);
+        delete[] combinedNormalMap;
     }
 
-    // Save sinusoidal heightmap
-    std::cout << "Saving heightmap (sinusoidal): " << heightmapPath << '\n';
-    if (!stbi_write_png(heightmapPath.c_str(), outWidth, outHeight, 1, heightmapSinu.data(), outWidth))
+    // =========================================================================
+    // Save all cubemap textures
+    // =========================================================================
+    std::cout << "Saving cubemap textures..." << '\n';
+
+    // Save bathymetry heightmap cubemap
+    if (bathymetryCubemap)
     {
-        std::cerr << "Failed to save heightmap" << '\n';
-        std::cout << "===================================" << '\n';
-        return false;
+        std::cout << "Saving bathymetry depth cubemap: " << bathymetryHeightPath << '\n';
+        if (!stbi_write_png(bathymetryHeightPath.c_str(), cubemapWidth, cubemapHeight, 1, bathymetryCubemap, cubemapWidth))
+        {
+            std::cerr << "  WARNING: Failed to save bathymetry heightmap" << '\n';
+        }
+        delete[] bathymetryCubemap;
     }
 
-    // Save sinusoidal normal map
-    std::cout << "Saving normal map (sinusoidal): " << normalMapPath << '\n';
-    if (!stbi_write_png(normalMapPath.c_str(), outWidth, outHeight, 3, normalMapSinu.data(), outWidth * 3))
+    // Save bathymetry normal map cubemap
+    if (bathymetryNormalCubemap)
     {
-        std::cerr << "Failed to save normal map" << '\n';
-        std::cout << "===================================" << '\n';
-        return false;
+        std::cout << "Saving bathymetry normal cubemap: " << bathymetryNormalPath << '\n';
+        if (!stbi_write_png(bathymetryNormalPath.c_str(), cubemapWidth, cubemapHeight, 3, bathymetryNormalCubemap, cubemapWidth * 3))
+        {
+            std::cerr << "  WARNING: Failed to save bathymetry normal map" << '\n';
+        }
+        delete[] bathymetryNormalCubemap;
+    }
+
+    // Save combined normal map cubemap
+    if (combinedNormalCubemap)
+    {
+        std::cout << "Saving combined normal cubemap: " << combinedNormalPath << '\n';
+        if (!stbi_write_png(combinedNormalPath.c_str(), cubemapWidth, cubemapHeight, 3, combinedNormalCubemap, cubemapWidth * 3))
+        {
+            std::cerr << "  WARNING: Failed to save combined normal map" << '\n';
+        }
+        delete[] combinedNormalCubemap;
+    }
+
+    // Save heightmap cubemap
+    if (heightmapCubemap)
+    {
+        std::cout << "Saving heightmap cubemap: " << heightmapPath << '\n';
+        if (!stbi_write_png(heightmapPath.c_str(), cubemapWidth, cubemapHeight, 1, heightmapCubemap, cubemapWidth))
+        {
+            std::cerr << "Failed to save heightmap" << '\n';
+            delete[] heightmapCubemap;
+            if (normalMapCubemap) delete[] normalMapCubemap;
+            std::cout << "===================================" << '\n';
+            return false;
+        }
+        delete[] heightmapCubemap;
+    }
+
+    // Save normal map cubemap
+    if (normalMapCubemap)
+    {
+        std::cout << "Saving normal map cubemap: " << normalMapPath << '\n';
+        if (!stbi_write_png(normalMapPath.c_str(), cubemapWidth, cubemapHeight, 3, normalMapCubemap, cubemapWidth * 3))
+        {
+            std::cerr << "Failed to save normal map" << '\n';
+            delete[] normalMapCubemap;
+            std::cout << "===================================" << '\n';
+            return false;
+        }
+        delete[] normalMapCubemap;
     }
 
     auto endTime = std::chrono::high_resolution_clock::now();

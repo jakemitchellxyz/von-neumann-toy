@@ -98,11 +98,11 @@ bool InitScreenRenderer(ScreenRendererState &state,
             screenState->height = newHeight;
         }
         // Update InputController with new window size
-        INPUT.onWindowResize(newWidth, newHeight);
+        g_input.onWindowResize(newWidth, newHeight);
     });
 
     // Initialize input controller with the window
-    INPUT.initialize(state.window);
+    g_input.initialize(state.window);
 
     // Create a hidden OpenGL context window for UI rendering
     // This allows us to use OpenGL for UI while using Vulkan for the main rendering
@@ -266,7 +266,7 @@ void RenderFrame(ScreenRendererState &state)
     }
 
     // End input frame - clear per-frame events
-    INPUT.endFrame();
+    g_input.endFrame();
 }
 
 // Check if window should close
@@ -351,7 +351,7 @@ void PollEvents(ScreenRendererState &state)
     {
         // Begin input frame BEFORE polling events
         // This clears per-frame state, then callbacks set new values
-        INPUT.beginFrame();
+        g_input.beginFrame();
 
         // Poll events - triggers GLFW callbacks that update input state
         glfwPollEvents();
@@ -386,4 +386,14 @@ GLFWwindow *GetOpenGLContextForUI(ScreenRendererState &state)
         return state.openglContextWindow;
     }
     return nullptr;
+}
+
+// Get hovered NAIF ID from GPU shader (0 if nothing hovered)
+uint32_t GetHoveredNaifId(const ScreenRendererState &state)
+{
+    if (!state.initialized)
+    {
+        return 0;
+    }
+    return state.vulkanRenderer.confirmedHoverMaterialID;
 }

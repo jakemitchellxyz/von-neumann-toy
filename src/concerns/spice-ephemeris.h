@@ -177,4 +177,8 @@ std::string getLastError();
 // Check if a specific body ID has data available
 bool hasBodyData(int naifId);
 
+// Get body name from NAIF ID
+// Returns empty string if body not found
+std::string getBodyName(int naifId);
+
 } // namespace SpiceEphemeris

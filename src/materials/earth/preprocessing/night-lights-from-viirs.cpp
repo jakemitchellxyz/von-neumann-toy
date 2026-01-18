@@ -1,4 +1,5 @@
 #include "../../../concerns/constants.h"
+#include "../../helpers/cubemap-conversion.h"
 #include "../earth-material.h"
 
 
@@ -488,71 +489,20 @@ bool EarthMaterial::preprocessNightlights(const std::string &defaultsPath,
     int outWidth, outHeight;
     getResolutionDimensions(resolution, outWidth, outHeight);
 
-    std::cout << "Converting to sinusoidal projection (" << outWidth << "x" << outHeight << ")..." << '\n';
+    std::cout << "Preparing equirectangular buffer (" << workWidth << "x" << workHeight << ")..." << '\n';
 
-    // Convert equirectangular combined to sinusoidal output
-    std::vector<unsigned char> sinusoidal(outWidth * outHeight, 0);
-
-    for (int y = 0; y < outHeight; y++)
+    // Convert combined float data to unsigned char equirectangular
+    std::vector<unsigned char> equirect(workWidth * workHeight, 0);
+    for (int i = 0; i < workWidth * workHeight; i++)
     {
-        float v = static_cast<float>(y) / (outHeight - 1);
-        float lat = (0.5f - v) * static_cast<float>(PI);
-        float cosLat = std::cos(lat);
-
-        float uMin = 0.5f - 0.5f * std::abs(cosLat);
-        float uMax = 0.5f + 0.5f * std::abs(cosLat);
-
-        for (int x = 0; x < outWidth; x++)
-        {
-            float u = static_cast<float>(x) / (outWidth - 1);
-            int dstIdx = y * outWidth + x;
-
-            if (u < uMin || u > uMax)
-            {
-                sinusoidal[dstIdx] = 0;
-                continue;
-            }
-
-            // Inverse sinusoidal to equirectangular
-            float x_sinu = (u - 0.5f) * 2.0f * static_cast<float>(PI);
-            float lon = (std::abs(cosLat) > 0.001f) ? (x_sinu / cosLat) : 0.0f;
-
-            float u_equirect = lon / (2.0f * static_cast<float>(PI)) + 0.5f;
-            float v_equirect = v;
-
-            u_equirect = std::max(0.0f, std::min(1.0f, u_equirect));
-            v_equirect = std::max(0.0f, std::min(1.0f, v_equirect));
-
-            // Bilinear sample from combined
-            float srcX = u_equirect * (workWidth - 1);
-            float srcY = v_equirect * (workHeight - 1);
-
-            int x0 = static_cast<int>(srcX);
-            int y0 = static_cast<int>(srcY);
-            int x1 = std::min(x0 + 1, workWidth - 1);
-            int y1 = std::min(y0 + 1, workHeight - 1);
-
-            float fx = srcX - x0;
-            float fy = srcY - y0;
-
-            float p00 = combined[y0 * workWidth + x0];
-            float p10 = combined[y0 * workWidth + x1];
-            float p01 = combined[y1 * workWidth + x0];
-            float p11 = combined[y1 * workWidth + x1];
-
-            float top = p00 * (1 - fx) + p10 * fx;
-            float bottom = p01 * (1 - fx) + p11 * fx;
-            float value = top * (1 - fy) + bottom * fy;
-
-            sinusoidal[dstIdx] = static_cast<unsigned char>(value * 255.0f);
-        }
+        equirect[i] = static_cast<unsigned char>(combined[i] * 255.0f);
     }
+    combined.clear(); // Free float data
 
     // =========================================================================
     // STEP 4: Apply landmass mask to filter ocean artifacts
     // =========================================================================
-    // Both nightlights and Blue Marble are now in SINUSOIDAL projection
-    // Generate landmass mask if it doesn't exist, then apply it
+    // Apply mask in equirectangular space before converting to cubemap
 
     std::cout << "Applying landmass mask from Blue Marble color..." << '\n';
 
@@ -574,29 +524,45 @@ bool EarthMaterial::preprocessNightlights(const std::string &defaultsPath,
 
         if (maskData)
         {
-            std::cout << "  Loaded landmass mask: " << maskW << "x" << maskH << " (sinusoidal)" << '\n';
+            // Determine if mask is cubemap (height = 6 * width) or other format
+            bool maskIsCubemap = isCubemapGridDimensions(maskW, maskH);
+            std::cout << "  Loaded landmass mask: " << maskW << "x" << maskH
+                      << (maskIsCubemap ? " (cubemap)" : " (equirectangular/sinusoidal)") << '\n';
 
             int maskedPixels = 0;
 
-            // Both are in sinusoidal - sample directly
-            for (int y = 0; y < outHeight; y++)
+            // Sample mask for each equirectangular pixel
+            for (int y = 0; y < workHeight; y++)
             {
-                for (int x = 0; x < outWidth; x++)
+                for (int x = 0; x < workWidth; x++)
                 {
-                    int dstIdx = y * outWidth + x;
+                    int dstIdx = y * workWidth + x;
+                    unsigned char maskVal = 255; // Default to land
 
-                    // Sample from mask (same sinusoidal space)
-                    int mx = static_cast<int>(static_cast<float>(x) / (outWidth - 1) * (maskW - 1));
-                    int my = static_cast<int>(static_cast<float>(y) / (outHeight - 1) * (maskH - 1));
-                    mx = std::min(mx, maskW - 1);
-                    my = std::min(my, maskH - 1);
-
-                    unsigned char maskVal = maskData[my * maskW + mx];
+                    if (maskIsCubemap)
+                    {
+                        // Convert equirectangular UV to direction, then sample cubemap mask
+                        float u = static_cast<float>(x) / (workWidth - 1);
+                        float v = static_cast<float>(y) / (workHeight - 1);
+                        float dirX, dirY, dirZ;
+                        equirectangularUVToDirection(u, v, dirX, dirY, dirZ);
+                        int faceSize = getFaceSizeFromStripDimensions(maskW, maskH);
+                        sampleCubemapStripUChar(maskData, faceSize, 1, dirX, dirY, dirZ, &maskVal);
+                    }
+                    else
+                    {
+                        // Sample from mask directly
+                        int mx = static_cast<int>(static_cast<float>(x) / (workWidth - 1) * (maskW - 1));
+                        int my = static_cast<int>(static_cast<float>(y) / (workHeight - 1) * (maskH - 1));
+                        mx = std::min(mx, maskW - 1);
+                        my = std::min(my, maskH - 1);
+                        maskVal = maskData[my * maskW + mx];
+                    }
 
                     // Mask ocean pixels (black in mask) to black in nightlights
                     if (maskVal == 0) // Ocean
                     {
-                        sinusoidal[dstIdx] = 0;
+                        equirect[dstIdx] = 0;
                         maskedPixels++;
                     }
                 }
@@ -604,7 +570,7 @@ bool EarthMaterial::preprocessNightlights(const std::string &defaultsPath,
 
             stbi_image_free(maskData);
 
-            float maskPercent = 100.0f * maskedPixels / (outWidth * outHeight);
+            float maskPercent = 100.0f * maskedPixels / (workWidth * workHeight);
             std::cout << "  Masked " << maskedPixels << " ocean pixels (" << maskPercent << "%)" << '\n';
         }
         else
@@ -617,16 +583,37 @@ bool EarthMaterial::preprocessNightlights(const std::string &defaultsPath,
         std::cout << "  WARNING: Landmass mask not found, skipping ocean masking" << '\n';
     }
 
-    // Save grayscale PNG
-    std::cout << "Saving: " << outFile << '\n';
-    if (!stbi_write_png(outFile.c_str(), outWidth, outHeight, 1, sinusoidal.data(), outWidth))
+    // =========================================================================
+    // STEP 5: Convert to cubemap format
+    // =========================================================================
+    std::cout << "Converting to cubemap format..." << '\n';
+
+    int faceSize = calculateCubemapFaceSize(workWidth, workHeight);
+    unsigned char *cubemapData = convertEquirectangularToCubemapUChar(equirect.data(), workWidth, workHeight, 1, faceSize);
+
+    if (!cubemapData)
     {
-        std::cerr << "ERROR: Failed to save nightlights texture" << '\n';
+        std::cerr << "ERROR: Failed to convert nightlights to cubemap" << '\n';
         std::cout << "==============================" << '\n';
         return false;
     }
 
-    std::cout << "SUCCESS: Generated nightlights texture" << '\n';
+    // Get cubemap dimensions
+    int cubemapWidth, cubemapHeight;
+    getCubemapStripDimensions(faceSize, cubemapWidth, cubemapHeight);
+
+    // Save cubemap as grayscale PNG
+    std::cout << "Saving cubemap: " << outFile << " (" << cubemapWidth << "x" << cubemapHeight << ")" << '\n';
+    if (!stbi_write_png(outFile.c_str(), cubemapWidth, cubemapHeight, 1, cubemapData, cubemapWidth))
+    {
+        std::cerr << "ERROR: Failed to save nightlights texture" << '\n';
+        delete[] cubemapData;
+        std::cout << "==============================" << '\n';
+        return false;
+    }
+
+    delete[] cubemapData;
+    std::cout << "SUCCESS: Generated nightlights cubemap texture" << '\n';
     std::cout << "==============================" << '\n';
     return true;
 }

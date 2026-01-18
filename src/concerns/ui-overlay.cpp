@@ -1380,7 +1380,7 @@ UIInteraction DrawUserInterface(int screenWidth,
     BeginUI(screenWidth, screenHeight);
 
     // Get mouse state from InputController
-    const InputState &inputState = INPUT.getState();
+    const InputState &inputState = g_input.getState();
     bool mouseDown = inputState.mouseButtonDown[0]; // Left button
     bool mouseClicked = inputState.mouseClicked;    // Left button click (press + release)
 
@@ -1506,7 +1506,7 @@ UIInteraction DrawUserInterface(int screenWidth,
 
         if (isTzDropdownHovering)
         {
-            INPUT.setCursor(CursorType::Pointer);
+            g_input.setCursor(CursorType::Pointer);
         }
 
         // Dropdown button background
@@ -1561,7 +1561,7 @@ UIInteraction DrawUserInterface(int screenWidth,
 
                 if (isOptionHovering)
                 {
-                    INPUT.setCursor(CursorType::Pointer);
+                    g_input.setCursor(CursorType::Pointer);
                 }
 
                 // Highlight current selection or hover
@@ -2263,7 +2263,7 @@ UIInteraction DrawUserInterface(int screenWidth,
 
             if (isDropdownHovering)
             {
-                INPUT.setCursor(CursorType::Pointer);
+                g_input.setCursor(CursorType::Pointer);
             }
 
             DrawRoundedRect(settingsX,
@@ -2318,7 +2318,7 @@ UIInteraction DrawUserInterface(int screenWidth,
 
                     if (isOptionHovering)
                     {
-                        INPUT.setCursor(CursorType::Pointer);
+                        g_input.setCursor(CursorType::Pointer);
                     }
 
                     // Highlight current selection or hover
@@ -2987,7 +2987,7 @@ UIInteraction DrawUserInterface(int screenWidth,
         // Note: Sliders, buttons, checkboxes, and accordions set their own cursors in ui-controls.cpp
         if (!g_shootModeActive && result.hoveredBody != nullptr)
         {
-            INPUT.setCursor(CursorType::Pointer);
+            g_input.setCursor(CursorType::Pointer);
         }
 
         // ==================================

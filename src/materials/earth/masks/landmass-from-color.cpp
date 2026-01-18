@@ -1,4 +1,5 @@
 #include "../../../concerns/constants.h"
+#include "../../helpers/cubemap-conversion.h"
 #include "../earth-material.h"
 
 
@@ -20,64 +21,26 @@
 namespace
 {
 // ============================================================================
-// Helper function: Convert sinusoidal UV to equirectangular UV for sampling elevation
+// Helper function: Sample elevation data at equirectangular coordinates
 // ============================================================================
-// Converts coordinates from sinusoidal projection (mask output) to equirectangular
-// projection (elevation data) for proper sampling.
-// - sinuX, sinuY: Pixel coordinates in sinusoidal space [0, width-1], [0, height-1]
-// - sinuWidth, sinuHeight: Dimensions of sinusoidal space
-// Returns: equirectangular UV coordinates [0, 1] for sampling elevation data
-std::pair<float, float> sinusoidalToEquirectUV(int sinuX, int sinuY, int sinuWidth, int sinuHeight)
+// Samples elevation data with bilinear interpolation.
+// - x, y: Pixel coordinates in output space
+// - width, height: Dimensions of output space
+float sampleElevation(float *elevationData,
+                      int elevationWidth,
+                      int elevationHeight,
+                      int x,
+                      int y,
+                      int width,
+                      int height)
 {
-    // Convert to normalized UV [0, 1]
-    float u_sinu = static_cast<float>(sinuX) / (sinuWidth - 1);
-    float v_sinu = static_cast<float>(sinuY) / (sinuHeight - 1);
-
-    // Convert to latitude
-    float lat = (0.5f - v_sinu) * static_cast<float>(PI);
-    float cosLat = std::cos(lat);
-
-    // Inverse sinusoidal projection: x_sinu = lon * cos(lat)
-    // So: lon = x_sinu / cos(lat)
-    float x_sinu = (u_sinu - 0.5f) * 2.0f * static_cast<float>(PI);
-    float lon = (std::abs(cosLat) > 0.001f) ? (x_sinu / cosLat) : 0.0f;
-
-    // Clamp longitude to valid range [-π, π]
-    while (lon > static_cast<float>(PI))
-        lon -= 2.0f * static_cast<float>(PI);
-    while (lon < -static_cast<float>(PI))
-        lon += 2.0f * static_cast<float>(PI);
-
-    // Convert to equirectangular UV
-    float u_equirect = lon / (2.0f * static_cast<float>(PI)) + 0.5f;
-    float v_equirect = v_sinu; // Same latitude mapping
-
-    // Clamp to valid range
-    u_equirect = std::max(0.0f, std::min(1.0f, u_equirect));
-    v_equirect = std::max(0.0f, std::min(1.0f, v_equirect));
-
-    return std::make_pair(u_equirect, v_equirect);
-}
-
-// ============================================================================
-// Helper function: Sample elevation data at sinusoidal coordinates
-// ============================================================================
-// Samples elevation data (in equirectangular projection) at a point specified
-// in sinusoidal coordinates. Performs bilinear interpolation.
-float sampleElevationAtSinusoidal(float *elevationData,
-                                  int elevationWidth,
-                                  int elevationHeight,
-                                  int sinuX,
-                                  int sinuY,
-                                  int sinuWidth,
-                                  int sinuHeight)
-{
-    // Convert sinusoidal coordinates to equirectangular UV
-    auto [u_equirect, v_equirect] = sinusoidalToEquirectUV(sinuX, sinuY, sinuWidth, sinuHeight);
+    // Convert to UV coordinates [0, 1]
+    float u = static_cast<float>(x) / (width - 1);
+    float v = static_cast<float>(y) / (height - 1);
 
     // Convert to pixel coordinates in elevation data
-    float srcX = u_equirect * (elevationWidth - 1);
-    float srcY = v_equirect * (elevationHeight - 1);
+    float srcX = u * (elevationWidth - 1);
+    float srcY = v * (elevationHeight - 1);
 
     // Bilinear interpolation
     int x0 = static_cast<int>(srcX);
@@ -296,7 +259,7 @@ void expandWaterMask(std::vector<unsigned char> &waterMask,
     std::cout << "  Expanding water mask recursively from perimeter..." << '\n';
     if (elevationData)
     {
-        std::cout << "    Using raw elevation data constraint (sea level = " << seaLevel << "m)" << '\n';
+        std::cout << "    Using elevation data constraint (sea level = " << seaLevel << "m)" << '\n';
     }
     else
     {
@@ -387,9 +350,9 @@ void expandWaterMask(std::vector<unsigned char> &waterMask,
             bool elevationOk = true;
             if (elevationData && elevationWidth > 0 && elevationHeight > 0)
             {
-                // Sample elevation data at sinusoidal coordinates (with coordinate transformation)
+                // Sample elevation data directly in equirectangular coordinates
                 float elevationValue =
-                    sampleElevationAtSinusoidal(elevationData, elevationWidth, elevationHeight, nx, ny, width, height);
+                    sampleElevation(elevationData, elevationWidth, elevationHeight, nx, ny, width, height);
 
                 // Only allow expansion to pixels at or below sea level
                 // Allow small tolerance (up to 5 meters) to account for noise and coastal variations
@@ -809,8 +772,8 @@ void applyDenoising(std::vector<unsigned char> &landmask,
 // adapted for RGB data: (Green - Red) / (Green + Red), combined with HSV color
 // space analysis and region growing to capture all water pixels including
 // shallow coastal water, turbid zones, and push the mask to continent edges.
-// - Input: Blue Marble monthly texture (earth_month_01.jpg/png)
-// - Output: earth_landmass_mask.png (sinusoidal projection)
+// - Input: Blue Marble monthly texture (earth_month_01.jpg/png) in cubemap format
+// - Output: earth_landmass_mask.png (cubemap vertical strip format)
 // - Used for: Filtering ocean pixels from other textures
 // - Algorithm: MNDWI (RGB approximation) + HSV analysis + region growing
 
@@ -864,7 +827,7 @@ bool EarthMaterial::preprocessLandmassMask(const std::string &defaultsPath,
     // Get output dimensions
     int outWidth, outHeight;
     getResolutionDimensions(resolution, outWidth, outHeight);
-    std::cout << "Output dimensions: " << outWidth << "x" << outHeight << " (sinusoidal)" << '\n';
+    std::cout << "Output dimensions: " << outWidth << "x" << outHeight << " (will convert to cubemap)" << '\n';
 
     // Load color texture (Blue Marble) - required dependency
     if (!std::filesystem::exists(colorPath))
@@ -882,7 +845,36 @@ bool EarthMaterial::preprocessLandmassMask(const std::string &defaultsPath,
         return false;
     }
 
-    std::cout << "  Loaded color data: " << cw << "x" << ch << " (sinusoidal)" << '\n';
+    // Check if color texture is in cubemap format (height = 6 * width)
+    bool colorIsCubemap = isCubemapStripDimensions(cw, ch);
+    std::cout << "  Loaded color data: " << cw << "x" << ch
+              << (colorIsCubemap ? " (cubemap)" : " (equirectangular)") << '\n';
+
+    // If color is cubemap, convert to equirectangular for processing
+    // This ensures all processing happens in consistent equirectangular space
+    unsigned char *colorEquirect = nullptr;
+    int colorEquirectW = 0, colorEquirectH = 0;
+
+    if (colorIsCubemap)
+    {
+        int faceSize = getFaceSizeFromStripDimensions(cw, ch);
+        // Use 2:1 aspect ratio for equirectangular (width = 2 * faceSize, height = faceSize)
+        colorEquirectW = faceSize * 2;
+        colorEquirectH = faceSize;
+        std::cout << "  Converting cubemap to equirectangular for processing..." << '\n';
+        colorEquirect = convertCubemapToEquirectangularUChar(colorData, faceSize, cc, colorEquirectW, colorEquirectH);
+        if (!colorEquirect)
+        {
+            std::cout << "  ERROR: Failed to convert cubemap to equirectangular" << '\n';
+            stbi_image_free(colorData);
+            return false;
+        }
+        // Free original cubemap data, use equirectangular for processing
+        stbi_image_free(colorData);
+        colorData = colorEquirect;
+        cw = colorEquirectW;
+        ch = colorEquirectH;
+    }
 
     // Find elevation GeoTIFF file for raw elevation data (optional - helps filter elevated areas)
     std::string elevationSourcePath = defaultsPath + "/earth-surface/elevation";
@@ -1034,9 +1026,9 @@ bool EarthMaterial::preprocessLandmassMask(const std::string &defaultsPath,
             // Apply elevation constraint: reject water detection if pixel is above sea level
             if (isWater && elevationData && elevationW > 0 && elevationH > 0)
             {
-                // Sample elevation data at sinusoidal coordinates (with coordinate transformation)
+                // Sample elevation data directly in equirectangular coordinates
                 float elevationValue =
-                    sampleElevationAtSinusoidal(elevationData, elevationW, elevationH, x, y, outWidth, outHeight);
+                    sampleElevation(elevationData, elevationW, elevationH, x, y, outWidth, outHeight);
 
                 // If pixel is significantly above sea level, reject water detection
                 // Allow small tolerance (up to 10 meters) for noise and coastal variations
@@ -1108,25 +1100,58 @@ bool EarthMaterial::preprocessLandmassMask(const std::string &defaultsPath,
         delete[] elevationData;
     }
 
-    stbi_image_free(colorData);
+    // Free color data - use delete[] if we converted from cubemap, stbi_image_free otherwise
+    if (colorIsCubemap)
+    {
+        delete[] colorData; // Was allocated by convertCubemapToEquirectangularUChar
+    }
+    else
+    {
+        stbi_image_free(colorData); // Was allocated by stbi_load
+    }
 
-    // Save landmass mask
-    if (!stbi_write_png(landmaskPath.c_str(), outWidth, outHeight, 1, landmaskImg.data(), outWidth))
+    // Convert landmass mask to cubemap format
+    std::cout << "  Converting landmass mask to cubemap format..." << '\n';
+    int faceSize = calculateCubemapFaceSize(outWidth, outHeight);
+    unsigned char *maskCubemap = convertEquirectangularToCubemapUChar(landmaskImg.data(), outWidth, outHeight, 1, faceSize);
+
+    if (!maskCubemap)
+    {
+        std::cerr << "  ERROR: Failed to convert landmass mask to cubemap" << '\n';
+        return false;
+    }
+
+    // Get cubemap dimensions
+    int cubemapWidth, cubemapHeight;
+    getCubemapStripDimensions(faceSize, cubemapWidth, cubemapHeight);
+
+    // Save landmass mask as cubemap
+    if (!stbi_write_png(landmaskPath.c_str(), cubemapWidth, cubemapHeight, 1, maskCubemap, cubemapWidth))
     {
         std::cerr << "  ERROR: Failed to save landmass mask" << '\n';
+        delete[] maskCubemap;
         return false;
     }
 
-    std::cout << "  Saved landmass mask: " << landmaskPath << '\n';
+    delete[] maskCubemap;
+    std::cout << "  Saved landmass mask cubemap: " << landmaskPath << " (" << cubemapWidth << "x" << cubemapHeight << ")" << '\n';
 
-    // Save denoising mask
+    // Convert and save denoising mask as cubemap
     std::string denoiseMaskPath = outputPath + "/earth_landmass_gradient.png";
-    if (!stbi_write_png(denoiseMaskPath.c_str(), outWidth, outHeight, 1, denoiseMask.data(), outWidth))
+    unsigned char *denoiseCubemap = convertEquirectangularToCubemapUChar(denoiseMask.data(), outWidth, outHeight, 1, faceSize);
+
+    if (denoiseCubemap)
     {
-        std::cerr << "  ERROR: Failed to save denoising mask" << '\n';
-        return false;
+        if (!stbi_write_png(denoiseMaskPath.c_str(), cubemapWidth, cubemapHeight, 1, denoiseCubemap, cubemapWidth))
+        {
+            std::cerr << "  WARNING: Failed to save denoising mask" << '\n';
+        }
+        else
+        {
+            std::cout << "  Saved denoising mask cubemap: " << denoiseMaskPath << '\n';
+        }
+        delete[] denoiseCubemap;
     }
 
-    std::cout << "  Saved denoising mask: " << denoiseMaskPath << '\n';
     return true;
 }

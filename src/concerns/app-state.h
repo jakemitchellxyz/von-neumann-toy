@@ -113,7 +113,7 @@ struct WorldPushConstants
 // ==================================
 // Packed struct for celestial objects sent to GPU via SSBO
 // Uses std430 layout: vec4 aligned to 16 bytes
-// Each object represents a sphere in world space
+// Each object represents a sphere in world space with rotation data from SPICE
 struct CelestialObject
 {
     glm::vec3 position; // Position in display units (AU * UNITS_PER_AU)
@@ -122,14 +122,23 @@ struct CelestialObject
     glm::vec3 color; // RGB color for rendering
     int32_t naifId;  // NAIF SPICE ID for identification
 
-    // Default constructor
-    CelestialObject() : position(0.0f), radius(1.0f), color(1.0f), naifId(0)
+    glm::vec3 poleDirection; // North pole direction from SPICE (J2000 coords, Z-up)
+    float _padding1;         // Alignment padding
+
+    glm::vec3 primeMeridianDirection; // Prime meridian direction from SPICE (J2000 coords)
+    float _padding2;                  // Alignment padding
+
+    // Default constructor - J2000 coords: Z-up, X toward vernal equinox
+    CelestialObject()
+        : position(0.0f), radius(1.0f), color(1.0f), naifId(0), poleDirection(0.0f, 0.0f, 1.0f), _padding1(0.0f),
+          primeMeridianDirection(1.0f, 0.0f, 0.0f), _padding2(0.0f)
     {
     }
 
-    // Constructor with parameters
+    // Constructor with parameters - J2000 coords: Z-up, X toward vernal equinox
     CelestialObject(glm::vec3 pos, float rad, glm::vec3 col, int32_t id)
-        : position(pos), radius(rad), color(col), naifId(id)
+        : position(pos), radius(rad), color(col), naifId(id), poleDirection(0.0f, 0.0f, 1.0f), _padding1(0.0f),
+          primeMeridianDirection(1.0f, 0.0f, 0.0f), _padding2(0.0f)
     {
     }
 };
@@ -246,6 +255,22 @@ struct UIState
     uint32_t padding3;
 };
 
+// ==================================
+// HoverState - CPU-side Hover State (not sent to GPU)
+// ==================================
+// Tracks which body is currently being hovered and selected
+// Used for tooltip display and camera follow
+struct HoverState
+{
+    int32_t hoveredNaifId = 0;      // NAIF ID of body mouse is over (0 = none)
+    std::string hoveredBodyName;    // Name of hovered body for tooltip
+    int32_t selectedNaifId = 0;     // NAIF ID of selected body (0 = none)
+    std::string selectedBodyName;   // Name of selected body
+    bool followingSelected = false; // True if camera is following selected body
+    float followDistance = 3.0f;    // Distance from body in radii
+    glm::vec3 cameraOffset{0.0f};   // Offset from body center to camera (used for orbit)
+};
+
 // Texture resolution enum values (matching existing TextureResolution enum)
 enum class TextureResolutionLevel : int32_t
 {
@@ -275,6 +300,7 @@ public:
     // State data (publicly accessible for direct modification)
     WorldState worldState;
     UIState uiState;
+    HoverState hoverState;
 
     // Load state from settings file
     bool loadFromSettings(const std::string &filepath = "settings.json5");

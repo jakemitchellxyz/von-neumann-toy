@@ -232,6 +232,7 @@ add_executable(vnt
     # Helper modules
     materials/helpers/noise.cpp
     materials/helpers/julian.cpp
+    materials/helpers/cubemap-conversion.cpp
 )
 
 # Include stb headers if found

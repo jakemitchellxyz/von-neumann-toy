@@ -176,9 +176,6 @@ constexpr int FAR_TRIANGLE_COUNT_MIN = 16;      // Minimum number of triangles f
 // Visualization Scale Factors
 // ==================================
 extern const float UNITS_PER_AU;
-extern const float MOON_DISTANCE_SCALE;
-extern const float EARTH_DISPLAY_RADIUS;
-extern const float MIN_DISPLAY_RADIUS;
 extern const float SKYBOX_RADIUS;
 
 // ==================================

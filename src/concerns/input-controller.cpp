@@ -9,17 +9,17 @@
 
 static void glfwMouseMoveCallback(GLFWwindow * /*window*/, double xpos, double ypos)
 {
-    INPUT.onMouseMove(xpos, ypos);
+    g_input.onMouseMove(xpos, ypos);
 }
 
 static void glfwMouseButtonCallback(GLFWwindow * /*window*/, int button, int action, int mods)
 {
-    INPUT.onMouseButton(button, action, mods);
+    g_input.onMouseButton(button, action, mods);
 }
 
 static void glfwScrollCallback(GLFWwindow * /*window*/, double xoffset, double yoffset)
 {
-    INPUT.onScroll(xoffset, yoffset);
+    g_input.onScroll(xoffset, yoffset);
 }
 
 // ==================================

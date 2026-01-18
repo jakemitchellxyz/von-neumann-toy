@@ -9,6 +9,7 @@
 // to the output directory for use during rendering.
 
 #include "../../concerns/constants.h"
+#include "../../materials/helpers/cubemap-conversion.h"
 #include "../settings.h"
 #include "../stars-dynamic-skybox.h"
 #include <filesystem>
@@ -109,295 +110,9 @@ static void resizeImageFloat(const float *src, int srcW, int srcH, float *dst, i
 }
 
 // ==================================
-// Equirectangular to Cubemap Conversion
+// Cubemap conversion functions are now in shared utilities
+// See: src/materials/helpers/cubemap-conversion.h
 // ==================================
-// Converts equirectangular (lat/long) projection to cubemap format
-// Cubemap faces are stored in a vertical strip: +X, -X, +Y, -Y, +Z, -Z
-// Each face is faceSize x faceSize pixels
-
-// Cubemap face indices (matches Vulkan VK_IMAGE_VIEW_TYPE_CUBE order)
-enum CubemapFace
-{
-    FACE_POSITIVE_X = 0, // Right
-    FACE_NEGATIVE_X = 1, // Left
-    FACE_POSITIVE_Y = 2, // Top
-    FACE_NEGATIVE_Y = 3, // Bottom
-    FACE_POSITIVE_Z = 4, // Front
-    FACE_NEGATIVE_Z = 5  // Back
-};
-
-// Convert cubemap face pixel coordinates to 3D direction vector
-static void cubemapPixelToDirection(int face, int x, int y, int faceSize, float &dirX, float &dirY, float &dirZ)
-{
-    // Map pixel coordinates to [-1, 1] range
-    // Add 0.5 to sample at pixel center
-    float u = (2.0f * (x + 0.5f) / faceSize) - 1.0f;
-    float v = (2.0f * (y + 0.5f) / faceSize) - 1.0f;
-
-    // Convert to 3D direction based on face
-    // Note: v is inverted for some faces to match texture coordinate conventions
-    switch (face)
-    {
-    case FACE_POSITIVE_X: // +X (right)
-        dirX = 1.0f;
-        dirY = -v;
-        dirZ = -u;
-        break;
-    case FACE_NEGATIVE_X: // -X (left)
-        dirX = -1.0f;
-        dirY = -v;
-        dirZ = u;
-        break;
-    case FACE_POSITIVE_Y: // +Y (top)
-        dirX = u;
-        dirY = 1.0f;
-        dirZ = v;
-        break;
-    case FACE_NEGATIVE_Y: // -Y (bottom)
-        dirX = u;
-        dirY = -1.0f;
-        dirZ = -v;
-        break;
-    case FACE_POSITIVE_Z: // +Z (front)
-        dirX = u;
-        dirY = -v;
-        dirZ = 1.0f;
-        break;
-    case FACE_NEGATIVE_Z: // -Z (back)
-        dirX = -u;
-        dirY = -v;
-        dirZ = -1.0f;
-        break;
-    }
-
-    // Normalize direction
-    float len = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
-    dirX /= len;
-    dirY /= len;
-    dirZ /= len;
-}
-
-// Convert 3D direction to equirectangular UV coordinates
-static void directionToEquirectangularUV(float dirX, float dirY, float dirZ, float &u, float &v)
-{
-    // Convert direction to spherical coordinates
-    // longitude (theta) = atan2(z, x), range [-π, π]
-    // latitude (phi) = asin(y), range [-π/2, π/2]
-    float theta = std::atan2(dirZ, dirX);
-    float phi = std::asin(std::clamp(dirY, -1.0f, 1.0f));
-
-    // Convert to UV coordinates
-    // U: longitude maps to [0, 1], with 0 at -π and 1 at +π
-    // V: latitude maps to [0, 1], with 0 at +π/2 (top) and 1 at -π/2 (bottom)
-    u = (theta + static_cast<float>(PI)) / (2.0f * static_cast<float>(PI));
-    v = 0.5f - phi / static_cast<float>(PI);
-
-    // Wrap U to [0, 1]
-    if (u < 0.0f)
-        u += 1.0f;
-    if (u >= 1.0f)
-        u -= 1.0f;
-
-    // Clamp V to [0, 1]
-    v = std::clamp(v, 0.0f, 1.0f);
-}
-
-// Sample equirectangular image with bilinear interpolation (float version)
-static void sampleEquirectangularFloat(const float *src,
-                                       int srcW,
-                                       int srcH,
-                                       int channels,
-                                       float u,
-                                       float v,
-                                       float *outColor)
-{
-    // Convert UV to pixel coordinates
-    float srcX = u * srcW - 0.5f;
-    float srcY = v * srcH - 0.5f;
-
-    // Handle wrapping for X (horizontal)
-    int x0 = static_cast<int>(std::floor(srcX));
-    int x1 = x0 + 1;
-    float xFrac = srcX - x0;
-
-    // Wrap x0 and x1
-    x0 = ((x0 % srcW) + srcW) % srcW;
-    x1 = ((x1 % srcW) + srcW) % srcW;
-
-    // Clamp Y (vertical)
-    int y0 = static_cast<int>(std::floor(srcY));
-    int y1 = y0 + 1;
-    float yFrac = srcY - y0;
-
-    y0 = std::clamp(y0, 0, srcH - 1);
-    y1 = std::clamp(y1, 0, srcH - 1);
-
-    // Bilinear interpolation
-    for (int c = 0; c < channels; c++)
-    {
-        float v00 = src[(y0 * srcW + x0) * channels + c];
-        float v10 = src[(y0 * srcW + x1) * channels + c];
-        float v01 = src[(y1 * srcW + x0) * channels + c];
-        float v11 = src[(y1 * srcW + x1) * channels + c];
-
-        float v0 = v00 * (1.0f - xFrac) + v10 * xFrac;
-        float v1 = v01 * (1.0f - xFrac) + v11 * xFrac;
-        outColor[c] = v0 * (1.0f - yFrac) + v1 * yFrac;
-    }
-}
-
-// Sample equirectangular image with bilinear interpolation (unsigned char version)
-static void sampleEquirectangularUChar(const unsigned char *src,
-                                       int srcW,
-                                       int srcH,
-                                       int channels,
-                                       float u,
-                                       float v,
-                                       unsigned char *outColor)
-{
-    // Convert UV to pixel coordinates
-    float srcX = u * srcW - 0.5f;
-    float srcY = v * srcH - 0.5f;
-
-    // Handle wrapping for X (horizontal)
-    int x0 = static_cast<int>(std::floor(srcX));
-    int x1 = x0 + 1;
-    float xFrac = srcX - x0;
-
-    // Wrap x0 and x1
-    x0 = ((x0 % srcW) + srcW) % srcW;
-    x1 = ((x1 % srcW) + srcW) % srcW;
-
-    // Clamp Y (vertical)
-    int y0 = static_cast<int>(std::floor(srcY));
-    int y1 = y0 + 1;
-    float yFrac = srcY - y0;
-
-    y0 = std::clamp(y0, 0, srcH - 1);
-    y1 = std::clamp(y1, 0, srcH - 1);
-
-    // Bilinear interpolation
-    for (int c = 0; c < channels; c++)
-    {
-        float v00 = src[(y0 * srcW + x0) * channels + c];
-        float v10 = src[(y0 * srcW + x1) * channels + c];
-        float v01 = src[(y1 * srcW + x0) * channels + c];
-        float v11 = src[(y1 * srcW + x1) * channels + c];
-
-        float v0 = v00 * (1.0f - xFrac) + v10 * xFrac;
-        float v1 = v01 * (1.0f - xFrac) + v11 * xFrac;
-        outColor[c] = static_cast<unsigned char>(std::clamp(v0 * (1.0f - yFrac) + v1 * yFrac, 0.0f, 255.0f));
-    }
-}
-
-// Convert equirectangular HDR image to cubemap format (vertical strip)
-// Returns cubemap data as float array: 6 faces * faceSize * faceSize * channels
-// Faces are arranged vertically: +X, -X, +Y, -Y, +Z, -Z
-static float *convertEquirectangularToCubemapFloat(const float *equirectData,
-                                                   int equirectW,
-                                                   int equirectH,
-                                                   int channels,
-                                                   int faceSize)
-{
-    size_t cubemapSize = static_cast<size_t>(6) * faceSize * faceSize * channels;
-    float *cubemapData = new (std::nothrow) float[cubemapSize];
-    if (!cubemapData)
-    {
-        std::cerr << "    ERROR: Failed to allocate memory for cubemap (" << cubemapSize * sizeof(float) << " bytes)"
-                  << std::endl;
-        return nullptr;
-    }
-
-    std::cout << "    Converting equirectangular to cubemap..." << std::endl;
-    std::cout << "      Source: " << equirectW << "x" << equirectH << std::endl;
-    std::cout << "      Cubemap face size: " << faceSize << "x" << faceSize << std::endl;
-    std::cout << "      Output: " << faceSize << "x" << (faceSize * 6) << " (vertical strip)" << std::endl;
-
-    // Convert each face
-    for (int face = 0; face < 6; face++)
-    {
-        size_t faceOffset = static_cast<size_t>(face) * faceSize * faceSize * channels;
-
-        for (int y = 0; y < faceSize; y++)
-        {
-            for (int x = 0; x < faceSize; x++)
-            {
-                // Get 3D direction for this pixel
-                float dirX, dirY, dirZ;
-                cubemapPixelToDirection(face, x, y, faceSize, dirX, dirY, dirZ);
-
-                // Convert direction to equirectangular UV
-                float u, v;
-                directionToEquirectangularUV(dirX, dirY, dirZ, u, v);
-
-                // Sample equirectangular image
-                size_t pixelOffset = faceOffset + (static_cast<size_t>(y) * faceSize + x) * channels;
-                sampleEquirectangularFloat(equirectData,
-                                           equirectW,
-                                           equirectH,
-                                           channels,
-                                           u,
-                                           v,
-                                           &cubemapData[pixelOffset]);
-            }
-        }
-    }
-
-    return cubemapData;
-}
-
-// Convert equirectangular unsigned char image to cubemap format (vertical strip)
-static unsigned char *convertEquirectangularToCubemapUChar(const unsigned char *equirectData,
-                                                           int equirectW,
-                                                           int equirectH,
-                                                           int channels,
-                                                           int faceSize)
-{
-    size_t cubemapSize = static_cast<size_t>(6) * faceSize * faceSize * channels;
-    unsigned char *cubemapData = new (std::nothrow) unsigned char[cubemapSize];
-    if (!cubemapData)
-    {
-        std::cerr << "    ERROR: Failed to allocate memory for cubemap (" << cubemapSize << " bytes)" << std::endl;
-        return nullptr;
-    }
-
-    std::cout << "    Converting equirectangular to cubemap..." << std::endl;
-    std::cout << "      Source: " << equirectW << "x" << equirectH << std::endl;
-    std::cout << "      Cubemap face size: " << faceSize << "x" << faceSize << std::endl;
-    std::cout << "      Output: " << faceSize << "x" << (faceSize * 6) << " (vertical strip)" << std::endl;
-
-    // Convert each face
-    for (int face = 0; face < 6; face++)
-    {
-        size_t faceOffset = static_cast<size_t>(face) * faceSize * faceSize * channels;
-
-        for (int y = 0; y < faceSize; y++)
-        {
-            for (int x = 0; x < faceSize; x++)
-            {
-                // Get 3D direction for this pixel
-                float dirX, dirY, dirZ;
-                cubemapPixelToDirection(face, x, y, faceSize, dirX, dirY, dirZ);
-
-                // Convert direction to equirectangular UV
-                float u, v;
-                directionToEquirectangularUV(dirX, dirY, dirZ, u, v);
-
-                // Sample equirectangular image
-                size_t pixelOffset = faceOffset + (static_cast<size_t>(y) * faceSize + x) * channels;
-                sampleEquirectangularUChar(equirectData,
-                                           equirectW,
-                                           equirectH,
-                                           channels,
-                                           u,
-                                           v,
-                                           &cubemapData[pixelOffset]);
-            }
-        }
-    }
-
-    return cubemapData;
-}
 
 // Load TIF file using libtiff and convert to RGB unsigned char array
 static unsigned char *loadTIFAsRGB(const std::string &filepath, int &width, int &height, int &channels)
@@ -654,9 +369,9 @@ static bool preprocessTIFTexture(const std::string &sourceFile,
         return false;
     }
 
-    // Cubemap dimensions: faceSize x (faceSize * 6) as vertical strip
-    int cubemapWidth = faceSize;
-    int cubemapHeight = faceSize * 6;
+    // Cubemap dimensions: (faceSize * 3) x (faceSize * 2) as 3x2 grid
+    int cubemapWidth, cubemapHeight;
+    getCubemapGridDimensions(faceSize, cubemapWidth, cubemapHeight);
 
     // Save as PNG (with alpha) or JPG (without alpha)
     int result = 0;
@@ -681,7 +396,8 @@ static bool preprocessTIFTexture(const std::string &sourceFile,
     if (result)
     {
         std::cout << "    " << textureName << " cubemap saved successfully as "
-                  << (useTransparency ? "PNG (with transparency)" : "JPG") << std::endl;
+                  << (useTransparency ? "PNG (with transparency)" : "JPG") << " (" << cubemapWidth << "x"
+                  << cubemapHeight << " 3x2 grid)" << std::endl;
         std::cout << "      Output dimensions: " << cubemapWidth << "x" << cubemapHeight << " (6 faces vertical strip)"
                   << std::endl;
         return true;
@@ -941,18 +657,17 @@ static bool combineEXRTexturesAdditive(const std::string &sourceFile1,
         return false;
     }
 
-    // Save cubemap as vertical strip HDR (6 faces stacked vertically)
-    // Dimensions: faceSize x (faceSize * 6)
-    int cubemapWidth = faceSize;
-    int cubemapHeight = faceSize * 6;
+    // Save cubemap as 3x2 grid HDR (better cache coherency)
+    // Dimensions: (faceSize * 3) x (faceSize * 2)
+    int cubemapWidth, cubemapHeight;
+    getCubemapGridDimensions(faceSize, cubemapWidth, cubemapHeight);
     int result = stbi_write_hdr(outputFile.c_str(), cubemapWidth, cubemapHeight, srcChannels, cubemapData);
     delete[] cubemapData;
 
     if (result)
     {
         std::cout << "    " << textureName << " cubemap saved successfully" << std::endl;
-        std::cout << "      Output dimensions: " << cubemapWidth << "x" << cubemapHeight << " (6 faces vertical strip)"
-                  << std::endl;
+        std::cout << "      Output dimensions: " << cubemapWidth << "x" << cubemapHeight << " (3x2 grid)" << std::endl;
         return true;
     }
     else

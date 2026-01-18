@@ -609,13 +609,14 @@ void CameraController::clampSurfaceOrientation()
 // This allows the camera to get as close as human head height (6 feet) from planets.
 
 // Scale factors for dynamic near plane computation
-// Earth's display radius (1.5) corresponds to 6,371 km real radius
-// So 1 display unit ≈ 4,247 km for Earth
-// 1 meter ≈ 2.35e-7 display units for Earth
-// 2 meters ≈ 4.7e-7 display units for Earth
-static constexpr float DEFAULT_NEAR_PLANE = 0.1f; // Used when far from any surface
-static constexpr float MIN_NEAR_PLANE = 4.7e-7f;  // ~2 meters in Earth scale (allows ground-level viewing)
-static constexpr float MIN_ALTITUDE = 1.2e-4f;    // ~0.5 km minimum altitude from surface
+// Display units use consistent AU scaling: 1 AU = UNITS_PER_AU (600) display units
+// Earth's display radius = (6371 km / 149,597,870.7 km/AU) * 600 ≈ 0.0256 display units
+// So 1 display unit ≈ 249,330 km
+// 1 meter ≈ 4.0e-9 display units
+// 2 meters ≈ 8.0e-9 display units
+static constexpr float DEFAULT_NEAR_PLANE = 0.1f;  // Used when far from any surface
+static constexpr float MIN_NEAR_PLANE = 8.0e-9f;   // ~2 meters (allows ground-level viewing)
+static constexpr float MIN_ALTITUDE = 2.0e-6f;     // ~0.5 km minimum altitude from surface
 static constexpr float NEAR_PLANE_ALTITUDE_RATIO =
     0.05f; // Near plane = 5% of altitude (more stable for very close views)
 

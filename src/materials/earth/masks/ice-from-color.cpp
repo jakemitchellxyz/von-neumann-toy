@@ -16,7 +16,7 @@
 // ============================================================================
 // Creates 12 ice masks (one per month) based on white/ice colors in the
 // Blue Marble monthly images. Ice appears white/bright in satellite imagery.
-// Masks are output in sinusoidal projection (same as color textures).
+// Masks are output in cubemap format (same as color textures).
 // White = ice/snow, Black = everything else
 
 namespace

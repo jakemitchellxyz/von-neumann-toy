@@ -51,3 +51,7 @@ void PollEvents(ScreenRendererState &state);
 // Returns the OpenGL context window, or nullptr if not available
 // Call this before UI rendering to ensure OpenGL context is current
 GLFWwindow *GetOpenGLContextForUI(ScreenRendererState &state);
+
+// Get hovered NAIF ID from GPU shader (0 if nothing hovered)
+// This is the debounced, stable hover state
+uint32_t GetHoveredNaifId(const ScreenRendererState &state);

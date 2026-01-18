@@ -6,11 +6,13 @@
 // Import modules
 #include "concerns/app-state.h"
 #include "concerns/constants.h"
+#include "concerns/input-controller.h"
 #include "concerns/preprocess-data.h"
 #include "concerns/screen-renderer.h"
 #include "concerns/settings.h" // Keep for TextureResolution enum (temporary compatibility)
 #include "concerns/spice-ephemeris.h"
 
+#include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 
 #ifdef _WIN32
@@ -233,7 +235,7 @@ void InitializeCelestialObjects()
     APP_STATE.worldState.celestialObjectsInitialized = true;
 }
 
-// Update celestial object positions based on Julian date
+// Update celestial object positions and rotations based on Julian date
 void UpdateCelestialObjectPositions(double julianDate)
 {
     static bool firstUpdate = true;
@@ -245,6 +247,23 @@ void UpdateCelestialObjectPositions(double julianDate)
 
         // Convert AU to display units
         obj.position = glm::vec3(posAU) * UNITS_PER_AU;
+
+        // Get body frame (pole and prime meridian) from SPICE
+        // Keep in J2000 coordinates (Z-up) to match positions
+        glm::dvec3 pole, primeMeridian;
+        if (SpiceEphemeris::getBodyFrame(obj.naifId, julianDate, pole, primeMeridian))
+        {
+            // Use SPICE data directly in J2000 coordinates (no transformation)
+            // Positions are also in J2000, so surface normals will match
+            obj.poleDirection = glm::normalize(glm::vec3(pole));
+            obj.primeMeridianDirection = glm::normalize(glm::vec3(primeMeridian));
+        }
+        else
+        {
+            // Fallback: default orientation in J2000 (Z-up, X toward vernal equinox)
+            obj.poleDirection = glm::vec3(0.0f, 0.0f, 1.0f);
+            obj.primeMeridianDirection = glm::vec3(1.0f, 0.0f, 0.0f);
+        }
 
         if (firstUpdate)
         {
@@ -414,6 +433,13 @@ int main()
     // Initialize time tracking for frame-rate independent simulation
     auto lastFrameTime = std::chrono::high_resolution_clock::now();
 
+    // Mouse drag state for camera control
+    double lastMouseX = 0.0;
+    double lastMouseY = 0.0;
+    bool wasMouseDown = false;
+    constexpr float ROTATE_SPEED = 0.15f;
+    constexpr float ORBIT_SPEED = 0.005f;
+
     // Main loop - render scene with UI overlay
     while (!g_shouldShutdown && !ShouldClose(screenState))
     {
@@ -443,7 +469,156 @@ int main()
         // Poll events first - beginFrame clears state, then callbacks set new input values
         PollEvents(screenState);
 
-        // Render frame - UI can now check input state (clicks, etc.) set by PollEvents
+        // ====================================
+        // Handle hover and selection
+        // ====================================
+
+        // Get hovered body (from GPU shader via SSBO)
+        uint32_t hoveredNaifId = GetHoveredNaifId(screenState);
+
+        // Update hover state in AppState (for UI tooltip rendering)
+        APP_STATE.hoverState.hoveredNaifId = static_cast<int32_t>(hoveredNaifId);
+        APP_STATE.hoverState.hoveredBodyName =
+            hoveredNaifId > 0 ? SpiceEphemeris::getBodyName(static_cast<int>(hoveredNaifId)) : "";
+
+        // Get current mouse state
+        const InputState &inputState = g_input.getState();
+        double currentMouseX = inputState.mouseX;
+        double currentMouseY = inputState.mouseY;
+        bool isMouseDown = inputState.mouseButtonDown[0]; // Left mouse button
+        bool altKeyPressed = (glfwGetKey(screenState.window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
+                              glfwGetKey(screenState.window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
+
+        // Handle click-to-select (ignore if clicking on already-selected body)
+        if (g_input.wasMouseButtonPressed(MouseButton::Left) && hoveredNaifId > 0 &&
+            static_cast<int32_t>(hoveredNaifId) != APP_STATE.hoverState.selectedNaifId)
+        {
+            // Select the hovered body (different from current selection)
+            APP_STATE.hoverState.selectedNaifId = static_cast<int32_t>(hoveredNaifId);
+            APP_STATE.hoverState.selectedBodyName = APP_STATE.hoverState.hoveredBodyName;
+            APP_STATE.hoverState.followingSelected = true;
+
+            // Find the selected body and position camera
+            for (const auto &obj : APP_STATE.worldState.celestialObjects)
+            {
+                if (obj.naifId == APP_STATE.hoverState.selectedNaifId)
+                {
+                    // Position camera between body and sun, 3 radii away
+                    glm::vec3 sunPos(0.0f); // Sun is at origin in SSB coordinates
+                    glm::vec3 bodyPos = obj.position;
+                    float bodyRadius = obj.radius;
+
+                    // Direction from sun to body (camera will be on this line, between sun and body)
+                    glm::vec3 sunToBody = bodyPos - sunPos;
+                    float sunDist = glm::length(sunToBody);
+                    if (sunDist > 0.001f)
+                    {
+                        sunToBody = sunToBody / sunDist;
+                    }
+                    else
+                    {
+                        sunToBody = glm::vec3(1.0f, 0.0f, 0.0f); // Default direction
+                    }
+
+                    // Camera position: 3 radii away from body, toward the sun
+                    float distance = bodyRadius * APP_STATE.hoverState.followDistance;
+                    glm::vec3 cameraPos = bodyPos - sunToBody * distance;
+
+                    // Store offset from body to camera (for orbit control)
+                    APP_STATE.hoverState.cameraOffset = cameraPos - bodyPos;
+
+                    // Update camera position
+                    APP_STATE.worldState.camera.position = cameraPos;
+
+                    // Point camera at the body
+                    glm::vec3 toBody = glm::normalize(bodyPos - cameraPos);
+                    APP_STATE.worldState.camera.yaw = glm::degrees(atan2f(toBody.z, toBody.x));
+                    APP_STATE.worldState.camera.pitch = glm::degrees(asinf(glm::clamp(toBody.y, -1.0f, 1.0f)));
+
+                    std::cout << "Selected and following: " << APP_STATE.hoverState.selectedBodyName << "\n";
+                    break;
+                }
+            }
+        }
+
+        // ====================================
+        // Handle mouse drag for orbit/free-look while following
+        // ====================================
+        if (APP_STATE.hoverState.followingSelected && APP_STATE.hoverState.selectedNaifId > 0)
+        {
+            // Calculate mouse delta
+            double deltaX = currentMouseX - lastMouseX;
+            double deltaY = currentMouseY - lastMouseY;
+
+            // Only process drag if mouse was already down (not just pressed)
+            if (isMouseDown && wasMouseDown && (std::abs(deltaX) > 0.01 || std::abs(deltaY) > 0.01))
+            {
+                if (altKeyPressed)
+                {
+                    // Alt+drag: Orbit camera around the body center
+                    // Use rotation matrices around fixed world axes (longitude/latitude style)
+                    // This is completely decoupled from camera orientation
+                    glm::vec3 &offset = APP_STATE.hoverState.cameraOffset;
+                    float distance = glm::length(offset);
+
+                    if (distance > 0.001f)
+                    {
+                        // Longitude rotation: around world Y axis (horizontal drag)
+                        float lonAngle = -static_cast<float>(deltaX) * ORBIT_SPEED;
+                        glm::mat4 lonRot = glm::rotate(glm::mat4(1.0f), lonAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+
+                        // Latitude rotation: around horizontal axis perpendicular to offset in XZ plane
+                        // This axis is (-z, 0, x) normalized, which keeps us on a meridian
+                        glm::vec3 offsetXZ(offset.x, 0.0f, offset.z);
+                        float xzLen = glm::length(offsetXZ);
+                        glm::vec3 latAxis;
+                        if (xzLen > 0.001f)
+                        {
+                            latAxis = glm::normalize(glm::vec3(-offset.z, 0.0f, offset.x));
+                        }
+                        else
+                        {
+                            // Near pole, use arbitrary horizontal axis
+                            latAxis = glm::vec3(1.0f, 0.0f, 0.0f);
+                        }
+                        float latAngle = static_cast<float>(deltaY) * ORBIT_SPEED;
+                        glm::mat4 latRot = glm::rotate(glm::mat4(1.0f), latAngle, latAxis);
+
+                        // Apply rotations
+                        offset = glm::vec3(lonRot * latRot * glm::vec4(offset, 1.0f));
+
+                        // Normalize to exact distance (prevent any floating point drift)
+                        offset = glm::normalize(offset) * distance;
+                    }
+                }
+                else
+                {
+                    // Normal drag: Free-look (rotate camera without moving position)
+                    APP_STATE.worldState.camera.yaw += static_cast<float>(deltaX) * ROTATE_SPEED;
+                    APP_STATE.worldState.camera.pitch -= static_cast<float>(deltaY) * ROTATE_SPEED;
+
+                    // Clamp pitch to prevent flipping
+                    APP_STATE.worldState.camera.pitch = glm::clamp(APP_STATE.worldState.camera.pitch, -89.0f, 89.0f);
+                }
+            }
+
+            // Update camera position to follow the body using stored offset
+            for (const auto &obj : APP_STATE.worldState.celestialObjects)
+            {
+                if (obj.naifId == APP_STATE.hoverState.selectedNaifId)
+                {
+                    APP_STATE.worldState.camera.position = obj.position + APP_STATE.hoverState.cameraOffset;
+                    break;
+                }
+            }
+        }
+
+        // Update last mouse position
+        lastMouseX = currentMouseX;
+        lastMouseY = currentMouseY;
+        wasMouseDown = isMouseDown;
+
+        // Render frame - UI will read hover state from APP_STATE to display tooltip
         RenderFrame(screenState);
 
         // Propagate shutdown signal to renderer

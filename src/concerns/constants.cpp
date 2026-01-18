@@ -148,13 +148,10 @@ const double SCATTERING_ATMOSPHERE_KM = 100.0; // Optically significant atmosphe
 // ==================================
 // Visualization Scale Factors
 // ==================================
-// UNITS_PER_AU must be large enough that Sun's radius (164 units) < Mercury perihelion (0.307 AU)
-// At 600 units/AU: Mercury perihelion = 184 units, safely outside Sun's 164 unit radius
+// UNITS_PER_AU converts AU to display units using consistent scaling for both positions and radii
+// All celestial body sizes and distances use this same conversion factor
 const float UNITS_PER_AU = 600.0f;
-const float MOON_DISTANCE_SCALE = 50.0f; // Exaggerate moon distances for visibility
-const float EARTH_DISPLAY_RADIUS = 1.5f; // Earth = 1.5 display units baseline
-const float MIN_DISPLAY_RADIUS = 0.15f;  // Minimum size so tiny moons are visible
-const float SKYBOX_RADIUS = 50000.0f;    // Large sphere encompassing the solar system
+const float SKYBOX_RADIUS = 50000.0f; // Large sphere encompassing the solar system
 
 // ==================================
 // Render Settings
@@ -183,30 +180,9 @@ bool g_showAtmosphereLayers = false; // Default to hidden
 // ==================================
 float getDisplayRadius(double realRadiusKm)
 {
-    float ratio = static_cast<float>(realRadiusKm / RADIUS_EARTH_KM);
-    float displayRadius;
-
-    // Use sub-linear scaling for large bodies to keep them proportional to distances
-    // Without this, Sun (109x Earth) would appear 164 units when 1 AU = 600 units
-    // That makes it appear 3.7x its radius away instead of 215x
-    //
-    // Threshold: bodies larger than 10x Earth use sqrt scaling
-    // This keeps terrestrial planets accurate while shrinking giants
-    const float LARGE_BODY_THRESHOLD = 10.0f;
-
-    if (ratio > LARGE_BODY_THRESHOLD)
-    {
-        // sqrt scaling: Sun (109x) -> 10 + sqrt(99) ≈ 20x Earth instead of 109x
-        // This makes Sun ~30 units instead of 164, more proportional to 600 AU distance
-        float excess = ratio - LARGE_BODY_THRESHOLD;
-        float scaledExcess = std::sqrt(excess);
-        displayRadius = EARTH_DISPLAY_RADIUS * (LARGE_BODY_THRESHOLD + scaledExcess);
-    }
-    else
-    {
-        // Linear scaling for terrestrial planets and moons
-        displayRadius = EARTH_DISPLAY_RADIUS * ratio;
-    }
-
-    return std::max(displayRadius, MIN_DISPLAY_RADIUS);
+    // Convert km to AU, then scale by UNITS_PER_AU (same conversion as positions)
+    // This ensures proportionally correct sizes relative to orbital distances
+    // No arbitrary scaling - everything derives from SPICE data
+    constexpr double KM_PER_AU = 149597870.7;
+    return static_cast<float>((realRadiusKm / KM_PER_AU) * UNITS_PER_AU);
 }

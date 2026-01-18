@@ -1,6 +1,6 @@
 #include "../../../concerns/constants.h"
+#include "../../helpers/cubemap-conversion.h"
 #include "../earth-material.h"
-
 
 #include <cmath>
 #include <filesystem>
@@ -46,7 +46,7 @@ int EarthMaterial::preprocessSpecular(const std::string &defaultsPath,
     // Get output dimensions
     int outWidth, outHeight;
     getResolutionDimensions(resolution, outWidth, outHeight);
-    std::cout << "Output dimensions: " << outWidth << "x" << outHeight << " (sinusoidal)" << '\n';
+    std::cout << "Output dimensions: " << outWidth << "x" << outHeight << " (will convert to cubemap)" << '\n';
 
     // =========================================================================
     // Step 1: Load landmass mask (sinusoidal projection)
@@ -143,7 +143,7 @@ int EarthMaterial::preprocessSpecular(const std::string &defaultsPath,
 
         std::cout << "    Source: " << srcW << "x" << srcH << " (" << srcC << " channels)" << '\n';
 
-        // Resize to working resolution
+        // Resize equirectangular source to working resolution
         std::vector<unsigned char> resizedData(workWidth * workHeight * srcC);
         resizeImage(srcData, srcW, srcH, resizedData.data(), workWidth, workHeight, srcC);
         stbi_image_free(srcData);
@@ -156,6 +156,7 @@ int EarthMaterial::preprocessSpecular(const std::string &defaultsPath,
             for (int x = 0; x < workWidth; x++)
             {
                 int idx = y * workWidth + x;
+
                 // Red is channel index 0, Green is channel index 1 (R=0, G=1, B=2)
                 float red = resizedData[idx * srcC + 0] / 255.0f;
                 float green = resizedData[idx * srcC + 1] / 255.0f;
@@ -212,125 +213,68 @@ int EarthMaterial::preprocessSpecular(const std::string &defaultsPath,
     processedImages.clear(); // Free memory
 
     // =========================================================================
-    // Step 5: Convert equirectangular to sinusoidal projection
+    // Step 5: Process in equirectangular space
     // =========================================================================
     // Source images from NASA GIBS are in equirectangular projection
-    // We need to convert to sinusoidal to match our other textures
+    // We'll process in equirectangular and convert to cubemap at the end
 
-    std::cout << "Converting to sinusoidal projection..." << '\n';
+    std::cout << "Processing in equirectangular space..." << '\n';
 
-    std::vector<float> sinusoidal(outWidth * outHeight, 0.0f);
-
-    for (int y = 0; y < outHeight; y++)
-    {
-        float v = static_cast<float>(y) / (outHeight - 1);
-        float lat = (0.5f - v) * static_cast<float>(PI);
-        float cosLat = std::cos(lat);
-
-        // Sinusoidal bounds at this latitude
-        float uMin = 0.5f - 0.5f * std::abs(cosLat);
-        float uMax = 0.5f + 0.5f * std::abs(cosLat);
-
-        for (int x = 0; x < outWidth; x++)
-        {
-            float u = static_cast<float>(x) / (outWidth - 1);
-            int dstIdx = y * outWidth + x;
-
-            // Outside sinusoidal bounds = black
-            if (u < uMin || u > uMax)
-            {
-                sinusoidal[dstIdx] = 0.0f;
-                continue;
-            }
-
-            // Inverse sinusoidal to equirectangular
-            float x_sinu = (u - 0.5f) * 2.0f * static_cast<float>(PI);
-            float lon = (std::abs(cosLat) > 0.001f) ? (x_sinu / cosLat) : 0.0f;
-
-            float u_equirect = lon / (2.0f * static_cast<float>(PI)) + 0.5f;
-            float v_equirect = v;
-
-            u_equirect = std::max(0.0f, std::min(1.0f, u_equirect));
-            v_equirect = std::max(0.0f, std::min(1.0f, v_equirect));
-
-            // Bilinear sample from combined (equirectangular)
-            float srcX = u_equirect * (workWidth - 1);
-            float srcY = v_equirect * (workHeight - 1);
-
-            int x0 = static_cast<int>(srcX);
-            int y0 = static_cast<int>(srcY);
-            int x1 = std::min(x0 + 1, workWidth - 1);
-            int y1 = std::min(y0 + 1, workHeight - 1);
-
-            float fx = srcX - x0;
-            float fy = srcY - y0;
-
-            float p00 = combined[y0 * workWidth + x0];
-            float p10 = combined[y0 * workWidth + x1];
-            float p01 = combined[y1 * workWidth + x0];
-            float p11 = combined[y1 * workWidth + x1];
-
-            float top = p00 * (1 - fx) + p10 * fx;
-            float bottom = p01 * (1 - fx) + p11 * fx;
-            float value = top * (1 - fy) + bottom * fy;
-
-            sinusoidal[dstIdx] = value;
-        }
-    }
-
-    combined.clear(); // Free equirectangular data
-
-    // =========================================================================
-    // Step 5.5: Increase brightness uniformly before masking
-    // =========================================================================
-    // Clamp to [0, 1] to prevent overflow
+    // Normalize values
     std::cout << "Normalizing values..." << '\n';
-    for (int i = 0; i < outWidth * outHeight; i++)
+    for (int i = 0; i < workWidth * workHeight; i++)
     {
-        sinusoidal[i] = std::min(sinusoidal[i], 1.0f);
+        combined[i] = std::min(combined[i], 1.0f);
     }
 
     // =========================================================================
     // Step 6: Invert values so lighter = less rough, darker = rougher
     // =========================================================================
-    // Roughness: 0 = smooth/shiny, 1 = rough/matte
-    // The MODIS data has higher values for more reflective (smoother) surfaces
-    // So we invert: roughness = 1.0 - reflectivity
     std::cout << "Inverting values (lighter = less rough, darker = rougher)..." << '\n';
-    for (int i = 0; i < outWidth * outHeight; i++)
+    for (int i = 0; i < workWidth * workHeight; i++)
     {
-        // Invert: higher reflectance (lighter) -> lower roughness (smoother)
-        sinusoidal[i] = 1.0f - sinusoidal[i];
-        // Clamp to [0, 1]
-        sinusoidal[i] = std::max(0.0f, std::min(1.0f, sinusoidal[i]));
+        combined[i] = 1.0f - combined[i];
+        combined[i] = std::max(0.0f, std::min(1.0f, combined[i]));
     }
 
     // =========================================================================
     // Step 7: Apply landmass mask - multiply final roughness image by mask
     // =========================================================================
-    // This sets all non-land pixels to 0 (black)
-    // Landmass mask: white (255) = land, black (0) = ocean
     if (!landmask.empty())
     {
-        std::cout << "Applying landmass mask (multiply final image by mask)..." << '\n';
+        std::cout << "Applying landmass mask..." << '\n';
 
-        for (int y = 0; y < outHeight; y++)
+        // Determine if mask is cubemap format (3x2 grid: width = 1.5 * height)
+        bool maskIsCubemap = isCubemapGridDimensions(maskW, maskH);
+
+        for (int y = 0; y < workHeight; y++)
         {
-            for (int x = 0; x < outWidth; x++)
+            for (int x = 0; x < workWidth; x++)
             {
-                int idx = y * outWidth + x;
+                int idx = y * workWidth + x;
+                unsigned char maskVal = 255;
 
-                // Sample landmask at corresponding position (same sinusoidal space)
-                int mx = static_cast<int>(static_cast<float>(x) / (outWidth - 1) * (maskW - 1));
-                int my = static_cast<int>(static_cast<float>(y) / (outHeight - 1) * (maskH - 1));
-                mx = std::min(mx, maskW - 1);
-                my = std::min(my, maskH - 1);
+                if (maskIsCubemap)
+                {
+                    // Convert equirectangular UV to direction, then sample cubemap mask
+                    float u = static_cast<float>(x) / (workWidth - 1);
+                    float v = static_cast<float>(y) / (workHeight - 1);
+                    float dirX, dirY, dirZ;
+                    equirectangularUVToDirection(u, v, dirX, dirY, dirZ);
+                    int faceSize = getFaceSizeFromStripDimensions(maskW, maskH);
+                    sampleCubemapStripUChar(landmask.data(), faceSize, 1, dirX, dirY, dirZ, &maskVal);
+                }
+                else
+                {
+                    int mx = static_cast<int>(static_cast<float>(x) / (workWidth - 1) * (maskW - 1));
+                    int my = static_cast<int>(static_cast<float>(y) / (workHeight - 1) * (maskH - 1));
+                    mx = std::min(mx, maskW - 1);
+                    my = std::min(my, maskH - 1);
+                    maskVal = landmask[my * maskW + mx];
+                }
 
-                unsigned char maskVal = landmask[my * maskW + mx];
-                // Normalize mask to [0, 1] and multiply with final roughness image
-                // Ocean (mask=0) -> 0, Land (mask=255) -> keeps roughness value
                 float maskFactor = static_cast<float>(maskVal) / 255.0f;
-                sinusoidal[idx] *= maskFactor;
+                combined[idx] *= maskFactor;
             }
         }
 
@@ -338,28 +282,45 @@ int EarthMaterial::preprocessSpecular(const std::string &defaultsPath,
     }
 
     // =========================================================================
-    // Step 8: Save as grayscale PNG (sinusoidal projection)
+    // Step 8: Convert to cubemap and save
     // =========================================================================
 
-    std::vector<unsigned char> output(outWidth * outHeight);
-
-    for (int i = 0; i < outWidth * outHeight; i++)
+    // Convert float to unsigned char equirectangular
+    std::vector<unsigned char> equirect(workWidth * workHeight);
+    for (int i = 0; i < workWidth * workHeight; i++)
     {
-        output[i] = static_cast<unsigned char>(sinusoidal[i] * 255.0f);
+        equirect[i] = static_cast<unsigned char>(combined[i] * 255.0f);
     }
+    combined.clear();
 
-    // Save grayscale PNG
-    std::cout << "Saving: " << outFile << '\n';
-    if (!stbi_write_png(outFile.c_str(), outWidth, outHeight, 1, output.data(), outWidth))
+    // Convert to cubemap
+    std::cout << "Converting to cubemap format..." << '\n';
+    int faceSize = calculateCubemapFaceSize(workWidth, workHeight);
+    unsigned char *cubemapData = convertEquirectangularToCubemapUChar(equirect.data(), workWidth, workHeight, 1, faceSize);
+
+    if (!cubemapData)
     {
-        std::cerr << "ERROR: Failed to save specular texture" << '\n';
+        std::cerr << "ERROR: Failed to convert specular to cubemap" << '\n';
         std::cout << "===============================" << '\n';
         return 0;
     }
 
-    std::cout << "SUCCESS: Generated specular/roughness texture (relative green, sinusoidal, "
-                 "landmass only)"
-              << '\n';
+    // Get cubemap dimensions
+    int cubemapWidth, cubemapHeight;
+    getCubemapStripDimensions(faceSize, cubemapWidth, cubemapHeight);
+
+    // Save cubemap PNG
+    std::cout << "Saving cubemap: " << outFile << " (" << cubemapWidth << "x" << cubemapHeight << ")" << '\n';
+    if (!stbi_write_png(outFile.c_str(), cubemapWidth, cubemapHeight, 1, cubemapData, cubemapWidth))
+    {
+        std::cerr << "ERROR: Failed to save specular texture" << '\n';
+        delete[] cubemapData;
+        std::cout << "===============================" << '\n';
+        return 0;
+    }
+
+    delete[] cubemapData;
+    std::cout << "SUCCESS: Generated specular/roughness cubemap texture (relative green, landmass only)" << '\n';
     std::cout << "===============================" << '\n';
     return 1;
 }

@@ -145,7 +145,7 @@ void RenderFrame(VulkanRendererState &state)
     // Set cursor based on confirmed hover state (do this every frame since beginFrame resets to Arrow)
     if (state.confirmedHoverMaterialID > 0)
     {
-        INPUT.setCursor(CursorType::Pointer);
+        g_input.setCursor(CursorType::Pointer);
     }
 
     // Reset hover output before rendering (will be set by fragment shader if mouse hits something)
@@ -210,7 +210,7 @@ void RenderFrame(VulkanRendererState &state)
         pushWorldConstants(cmd, state.context.pipelineLayout, APP_STATE.worldState.toPushConstants());
 
         // Push input constants (mouse position and button state)
-        pushInputConstants(cmd, state.context.pipelineLayout, INPUT.getState().toPushConstants());
+        pushInputConstants(cmd, state.context.pipelineLayout, g_input.getState().toPushConstants());
 
         // Push camera constants (view/projection matrices, position, FOV)
         float aspectRatio = static_cast<float>(state.width) / static_cast<float>(state.height);
@@ -266,7 +266,7 @@ void RenderFrame(VulkanRendererState &state)
         pushWorldConstants(cmd, state.context.uiPipelineLayout, APP_STATE.worldState.toPushConstants());
 
         // Push input constants (mouse position and button state)
-        pushInputConstants(cmd, state.context.uiPipelineLayout, INPUT.getState().toPushConstants());
+        pushInputConstants(cmd, state.context.uiPipelineLayout, g_input.getState().toPushConstants());
 
         // Bind SSBO descriptor set (UIState)
         if (state.context.ssboDescriptorSet != VK_NULL_HANDLE)

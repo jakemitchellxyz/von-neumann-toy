@@ -2090,8 +2090,10 @@ bool createSSBOResources(VulkanContext &context)
 
     // Create SSBO buffer for CelestialObjects (binding 2)
     // Size: 4 bytes (count) + MAX_CELESTIAL_OBJECTS * sizeof(CelestialObject)
-    // CelestialObject is 32 bytes (2 vec4s): position(12) + radius(4) + color(12) + naifId(4)
-    constexpr size_t CELESTIAL_OBJECT_SIZE = 32; // 2 * sizeof(vec4)
+    // CelestialObject is 64 bytes (4 vec4s):
+    //   position(12) + radius(4) + color(12) + naifId(4) +
+    //   poleDirection(12) + padding(4) + primeMeridianDirection(12) + padding(4)
+    constexpr size_t CELESTIAL_OBJECT_SIZE = 64; // 4 * sizeof(vec4)
     constexpr size_t MAX_CELESTIAL_OBJECTS = 32;
     constexpr size_t CELESTIAL_SSBO_SIZE =
         16 + MAX_CELESTIAL_OBJECTS * CELESTIAL_OBJECT_SIZE; // 16 byte header for count + padding
@@ -2390,13 +2392,17 @@ void updateCelestialObjectsSSBO(VulkanContext &context,
 
     // GPU struct layout (must match shader):
     // struct CelestialObjectGPU {
-    //     vec3 position;  // 12 bytes
-    //     float radius;   // 4 bytes
-    //     vec3 color;     // 12 bytes
-    //     int naifId;     // 4 bytes
-    // }; // Total: 32 bytes (2 vec4s)
+    //     vec3 position;              // 12 bytes
+    //     float radius;               // 4 bytes
+    //     vec3 color;                 // 12 bytes
+    //     int naifId;                 // 4 bytes
+    //     vec3 poleDirection;         // 12 bytes (from SPICE)
+    //     float _padding1;            // 4 bytes
+    //     vec3 primeMeridianDirection;// 12 bytes (from SPICE)
+    //     float _padding2;            // 4 bytes
+    // }; // Total: 64 bytes (4 vec4s)
 
-    constexpr size_t CELESTIAL_OBJECT_SIZE = 32;
+    constexpr size_t CELESTIAL_OBJECT_SIZE = 64;
     constexpr size_t MAX_CELESTIAL_OBJECTS = 32;
     constexpr size_t HEADER_SIZE = 16;
 
@@ -2429,24 +2435,38 @@ void updateCelestialObjectsSSBO(VulkanContext &context,
     header[2] = 0;
     header[3] = 0;
 
-    // Write visible objects
+    // Write visible objects (16 floats = 64 bytes per object)
     auto *objectData = reinterpret_cast<float *>(reinterpret_cast<uint8_t *>(mapped) + HEADER_SIZE);
 
     for (uint32_t i = 0; i < objectCount; ++i)
     {
         const CelestialObject &obj = *visibleObjects[i];
-        size_t offset = i * 8;
+        size_t offset = i * 16; // 16 floats per object (64 bytes)
 
+        // vec4 0: position + radius
         objectData[offset + 0] = obj.position.x;
         objectData[offset + 1] = obj.position.y;
         objectData[offset + 2] = obj.position.z;
         objectData[offset + 3] = obj.radius;
 
+        // vec4 1: color + naifId
         objectData[offset + 4] = obj.color.x;
         objectData[offset + 5] = obj.color.y;
         objectData[offset + 6] = obj.color.z;
         auto *intPtr = reinterpret_cast<int32_t *>(&objectData[offset + 7]);
         *intPtr = obj.naifId;
+
+        // vec4 2: poleDirection + padding
+        objectData[offset + 8] = obj.poleDirection.x;
+        objectData[offset + 9] = obj.poleDirection.y;
+        objectData[offset + 10] = obj.poleDirection.z;
+        objectData[offset + 11] = 0.0f; // padding
+
+        // vec4 3: primeMeridianDirection + padding
+        objectData[offset + 12] = obj.primeMeridianDirection.x;
+        objectData[offset + 13] = obj.primeMeridianDirection.y;
+        objectData[offset + 14] = obj.primeMeridianDirection.z;
+        objectData[offset + 15] = 0.0f; // padding
     }
 
     vkUnmapMemory(context.device, context.celestialObjectsSSBO.allocation);
@@ -2588,7 +2608,7 @@ uint32_t buildUIVertexBuffer(VulkanContext &context, int screenWidth, int screen
     timeParams.textureResolution = static_cast<TextureResolution>(APP_STATE.uiState.textureResolution);
 
     // Get mouse position from InputController
-    const InputState &input = INPUT.getState();
+    const InputState &input = g_input.getState();
     double mouseX = input.mouseX;
     double mouseY = input.mouseY;
 
@@ -2598,6 +2618,13 @@ uint32_t buildUIVertexBuffer(VulkanContext &context, int screenWidth, int screen
     // Use world triangle count from previous frame (only 3D geometry, not UI)
     int triangleCount = static_cast<int>(context.worldTriangleCount);
 
+    // Create tooltip for hovered body (from hover state in AppState)
+    TooltipParams tooltip;
+    tooltip.show = !APP_STATE.hoverState.hoveredBodyName.empty();
+    tooltip.text = APP_STATE.hoverState.hoveredBodyName;
+    tooltip.mouseX = mouseX;
+    tooltip.mouseY = mouseY;
+
     UIInteraction interaction = DrawUserInterface(screenWidth,
                                                   screenHeight,
                                                   currentFPS,
@@ -2606,7 +2633,8 @@ uint32_t buildUIVertexBuffer(VulkanContext &context, int screenWidth, int screen
                                                   timeParams,
                                                   mouseX,
                                                   mouseY,
-                                                  nullptr);
+                                                  nullptr, // window
+                                                  tooltip.show ? &tooltip : nullptr);
 
     // Write time dilation back to AppState if changed by slider
     APP_STATE.worldState.timeDilation = static_cast<float>(timeDilation);
@@ -2785,256 +2813,38 @@ static uint32_t findImageMemoryType(VulkanContext &context, uint32_t typeFilter,
     return UINT32_MAX;
 }
 
+// Forward declaration for cubemap texture helper (defined later in file)
+static bool loadCubemapTextureHelper(VulkanContext &context,
+                                     const std::string &filepath,
+                                     VkImage &image,
+                                     VkDeviceMemory &imageMemory,
+                                     VkImageView &imageView,
+                                     VkSampler &sampler,
+                                     bool isHDR);
+
 // Load skybox cubemap texture from file (vertical strip format: 6 faces stacked)
+// Now uses native Vulkan cubemap for hardware-accelerated sampling
 bool loadSkyboxTexture(VulkanContext &context, const std::string &filepath)
 {
-    // Check if file exists
-    std::ifstream file(filepath);
-    if (!file.good())
-    {
-        std::cerr << "Skybox texture file not found: " << filepath << "\n";
-        return false;
-    }
-    file.close();
-
-    // Load HDR image using stb_image
-    // Note: stbi is already included via other files, but we need stbi_loadf for HDR
-    int width, height, channels;
+    // Determine if HDR based on file extension
     bool isHDR = filepath.find(".hdr") != std::string::npos || filepath.find(".HDR") != std::string::npos;
 
-    void *pixelData = nullptr;
-    VkFormat format;
-    VkDeviceSize imageSize;
+    // Use the cubemap helper to load as native Vulkan cubemap
+    bool success = loadCubemapTextureHelper(context,
+                                            filepath,
+                                            context.skyboxImage,
+                                            context.skyboxImageMemory,
+                                            context.skyboxImageView,
+                                            context.skyboxSampler,
+                                            isHDR);
 
-    if (isHDR)
+    if (success)
     {
-        // Load as float data for HDR
-        float *hdrData = stbi_loadf(filepath.c_str(), &width, &height, &channels, 4); // Force RGBA
-        if (!hdrData)
-        {
-            std::cerr << "Failed to load HDR skybox texture: " << filepath << "\n";
-            return false;
-        }
-        pixelData = hdrData;
-        format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        imageSize = static_cast<VkDeviceSize>(width) * height * 4 * sizeof(float);
-    }
-    else
-    {
-        // Load as unsigned char data for PNG/JPG
-        unsigned char *imgData = stbi_load(filepath.c_str(), &width, &height, &channels, 4); // Force RGBA
-        if (!imgData)
-        {
-            std::cerr << "Failed to load skybox texture: " << filepath << "\n";
-            return false;
-        }
-        pixelData = imgData;
-        format = VK_FORMAT_R8G8B8A8_UNORM;
-        imageSize = static_cast<VkDeviceSize>(width) * height * 4;
+        context.skyboxTextureReady = true;
+        std::cout << "Skybox native cubemap loaded successfully\n";
     }
 
-    std::cout << "Loading skybox cubemap texture: " << width << "x" << height << " (" << (isHDR ? "HDR" : "LDR") << ")"
-              << "\n";
-
-    // Create staging buffer
-    VulkanBuffer stagingBuffer =
-        createBuffer(context,
-                     imageSize,
-                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    // Copy pixel data to staging buffer
-    void *mapped;
-    vkMapMemory(context.device, stagingBuffer.allocation, 0, imageSize, 0, &mapped);
-    std::memcpy(mapped, pixelData, imageSize);
-    vkUnmapMemory(context.device, stagingBuffer.allocation);
-
-    // Free pixel data
-    stbi_image_free(pixelData);
-
-    // Create image
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = static_cast<uint32_t>(width);
-    imageInfo.extent.height = static_cast<uint32_t>(height);
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format = format;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.flags = 0;
-
-    if (vkCreateImage(context.device, &imageInfo, nullptr, &context.skyboxImage) != VK_SUCCESS)
-    {
-        std::cerr << "Failed to create skybox image!" << "\n";
-        destroyBuffer(context, stagingBuffer);
-        return false;
-    }
-
-    // Allocate memory for image
-    VkMemoryRequirements memRequirements;
-    vkGetImageMemoryRequirements(context.device, context.skyboxImage, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex =
-        findImageMemoryType(context, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    if (allocInfo.memoryTypeIndex == UINT32_MAX ||
-        vkAllocateMemory(context.device, &allocInfo, nullptr, &context.skyboxImageMemory) != VK_SUCCESS)
-    {
-        std::cerr << "Failed to allocate skybox image memory!" << "\n";
-        vkDestroyImage(context.device, context.skyboxImage, nullptr);
-        destroyBuffer(context, stagingBuffer);
-        return false;
-    }
-
-    vkBindImageMemory(context.device, context.skyboxImage, context.skyboxImageMemory, 0);
-
-    // Transition image layout and copy data
-    VkCommandBuffer commandBuffer;
-    VkCommandBufferAllocateInfo cmdAllocInfo{};
-    cmdAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmdAllocInfo.commandPool = context.commandPool;
-    cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmdAllocInfo.commandBufferCount = 1;
-
-    vkAllocateCommandBuffers(context.device, &cmdAllocInfo, &commandBuffer);
-
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-    // Transition to transfer dst
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = context.skyboxImage;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-    vkCmdPipelineBarrier(commandBuffer,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0,
-                         0,
-                         nullptr,
-                         0,
-                         nullptr,
-                         1,
-                         &barrier);
-
-    // Copy buffer to image
-    VkBufferImageCopy region{};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = {0, 0, 0};
-    region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-
-    vkCmdCopyBufferToImage(commandBuffer,
-                           stagingBuffer.buffer,
-                           context.skyboxImage,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           1,
-                           &region);
-
-    // Transition to shader read
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    vkCmdPipelineBarrier(commandBuffer,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0,
-                         0,
-                         nullptr,
-                         0,
-                         nullptr,
-                         1,
-                         &barrier);
-
-    vkEndCommandBuffer(commandBuffer);
-
-    // Submit and wait
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-
-    vkQueueSubmit(context.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(context.graphicsQueue);
-
-    vkFreeCommandBuffers(context.device, context.commandPool, 1, &commandBuffer);
-    destroyBuffer(context, stagingBuffer);
-
-    // Create image view
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = context.skyboxImage;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-
-    if (vkCreateImageView(context.device, &viewInfo, nullptr, &context.skyboxImageView) != VK_SUCCESS)
-    {
-        std::cerr << "Failed to create skybox image view!" << "\n";
-        return false;
-    }
-
-    // Create sampler
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.anisotropyEnable = VK_FALSE;
-    samplerInfo.maxAnisotropy = 1.0f;
-    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-    samplerInfo.unnormalizedCoordinates = VK_FALSE;
-    samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerInfo.mipLodBias = 0.0f;
-    samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = 0.0f;
-
-    if (vkCreateSampler(context.device, &samplerInfo, nullptr, &context.skyboxSampler) != VK_SUCCESS)
-    {
-        std::cerr << "Failed to create skybox sampler!" << "\n";
-        return false;
-    }
-
-    context.skyboxTextureReady = true;
-    std::cout << "Skybox cubemap texture loaded successfully" << "\n";
-    return true;
+    return success;
 }
 
 // Update skybox descriptor set binding (call after loading texture)
@@ -3329,7 +3139,290 @@ static bool loadTextureHelper(VulkanContext &context,
     return true;
 }
 
+// Helper function to load a vertical strip cubemap into native Vulkan cubemap (6 array layers)
+// The input file must be a vertical strip with height = 6 * width (6 faces stacked)
+// Face order: +X, -X, +Y, -Y, +Z, -Z (matches Vulkan VK_IMAGE_VIEW_TYPE_CUBE)
+// Returns true on success, outputs to image, imageMemory, imageView, sampler
+static bool loadCubemapTextureHelper(VulkanContext &context,
+                                     const std::string &filepath,
+                                     VkImage &image,
+                                     VkDeviceMemory &imageMemory,
+                                     VkImageView &imageView,
+                                     VkSampler &sampler,
+                                     bool isHDR = false)
+{
+    // Check if file exists
+    std::ifstream file(filepath);
+    if (!file.good())
+    {
+        std::cerr << "Cubemap texture file not found: " << filepath << "\n";
+        return false;
+    }
+    file.close();
+
+    // Load image using stb_image
+    int width, height, channels;
+    void *pixelData = nullptr;
+    VkFormat format;
+    size_t bytesPerPixel;
+
+    if (isHDR)
+    {
+        float *hdrData = stbi_loadf(filepath.c_str(), &width, &height, &channels, 4);
+        if (!hdrData)
+        {
+            std::cerr << "Failed to load HDR cubemap texture: " << filepath << "\n";
+            return false;
+        }
+        pixelData = hdrData;
+        format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        bytesPerPixel = 4 * sizeof(float);
+    }
+    else
+    {
+        unsigned char *imgData = stbi_load(filepath.c_str(), &width, &height, &channels, 4);
+        if (!imgData)
+        {
+            std::cerr << "Failed to load cubemap texture: " << filepath << "\n";
+            return false;
+        }
+        pixelData = imgData;
+        format = VK_FORMAT_R8G8B8A8_UNORM;
+        bytesPerPixel = 4;
+    }
+
+    // Validate cubemap dimensions (3x2 grid: width = 1.5 * height, width divisible by 3)
+    if (width != height * 3 / 2 || width % 3 != 0)
+    {
+        std::cerr << "Invalid cubemap dimensions: " << width << "x" << height
+                  << " (expected 3x2 grid: width = height * 1.5, width divisible by 3)\n";
+        stbi_image_free(pixelData);
+        return false;
+    }
+
+    int faceSize = width / 3; // Each face is faceSize x faceSize
+    int gridWidth = width;
+    int gridHeight = height;
+    VkDeviceSize totalImageSize = static_cast<VkDeviceSize>(gridWidth) * gridHeight * bytesPerPixel;
+
+    std::cout << "Loading native cubemap: " << filepath << " (grid: " << gridWidth << "x" << gridHeight
+              << ", face size: " << faceSize << "x" << faceSize << ", " << (isHDR ? "HDR" : "LDR") << ")\n";
+
+    // Create staging buffer for all 6 faces
+    VulkanBuffer stagingBuffer =
+        createBuffer(context,
+                     totalImageSize,
+                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    // Copy pixel data to staging buffer (3x2 grid layout)
+    void *mapped;
+    vkMapMemory(context.device, stagingBuffer.allocation, 0, totalImageSize, 0, &mapped);
+    std::memcpy(mapped, pixelData, totalImageSize);
+    vkUnmapMemory(context.device, stagingBuffer.allocation);
+
+    stbi_image_free(pixelData);
+
+    // Create cubemap image with CUBE_COMPATIBLE flag and 6 array layers
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = static_cast<uint32_t>(faceSize);
+    imageInfo.extent.height = static_cast<uint32_t>(faceSize);
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 6; // 6 faces for cubemap
+    imageInfo.format = format;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; // Enable cubemap
+
+    if (vkCreateImage(context.device, &imageInfo, nullptr, &image) != VK_SUCCESS)
+    {
+        std::cerr << "Failed to create cubemap image for: " << filepath << "\n";
+        destroyBuffer(context, stagingBuffer);
+        return false;
+    }
+
+    // Allocate memory for image
+    VkMemoryRequirements memRequirements;
+    vkGetImageMemoryRequirements(context.device, image, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex =
+        findImageMemoryType(context, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (allocInfo.memoryTypeIndex == UINT32_MAX ||
+        vkAllocateMemory(context.device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS)
+    {
+        std::cerr << "Failed to allocate cubemap image memory for: " << filepath << "\n";
+        vkDestroyImage(context.device, image, nullptr);
+        destroyBuffer(context, stagingBuffer);
+        return false;
+    }
+
+    vkBindImageMemory(context.device, image, imageMemory, 0);
+
+    // Transition image layout and copy data
+    VkCommandBuffer commandBuffer;
+    VkCommandBufferAllocateInfo cmdAllocInfo{};
+    cmdAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAllocInfo.commandPool = context.commandPool;
+    cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAllocInfo.commandBufferCount = 1;
+
+    vkAllocateCommandBuffers(context.device, &cmdAllocInfo, &commandBuffer);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+    // Transition all 6 layers to transfer dst
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 6; // All 6 faces
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    vkCmdPipelineBarrier(commandBuffer,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0,
+                         0,
+                         nullptr,
+                         0,
+                         nullptr,
+                         1,
+                         &barrier);
+
+    // Copy each face from staging buffer to its array layer
+    // Faces are stored in 3x2 grid: +X -X +Y (row 0), -Y +Z -Z (row 1)
+    // Face grid positions: 0=(0,0), 1=(1,0), 2=(2,0), 3=(0,1), 4=(1,1), 5=(2,1)
+    static const int faceCol[6] = {0, 1, 2, 0, 1, 2};
+    static const int faceRow[6] = {0, 0, 0, 1, 1, 1};
+
+    std::vector<VkBufferImageCopy> copyRegions(6);
+    for (uint32_t face = 0; face < 6; face++)
+    {
+        int col = faceCol[face];
+        int row = faceRow[face];
+        // Buffer offset to the start of this face's data in the grid
+        VkDeviceSize faceOffset =
+            (static_cast<VkDeviceSize>(row) * faceSize * gridWidth + static_cast<VkDeviceSize>(col) * faceSize) *
+            bytesPerPixel;
+
+        copyRegions[face].bufferOffset = faceOffset;
+        copyRegions[face].bufferRowLength = static_cast<uint32_t>(gridWidth); // Full grid width for row stride
+        copyRegions[face].bufferImageHeight = static_cast<uint32_t>(faceSize);
+        copyRegions[face].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copyRegions[face].imageSubresource.mipLevel = 0;
+        copyRegions[face].imageSubresource.baseArrayLayer = face;
+        copyRegions[face].imageSubresource.layerCount = 1;
+        copyRegions[face].imageOffset = {0, 0, 0};
+        copyRegions[face].imageExtent = {static_cast<uint32_t>(faceSize), static_cast<uint32_t>(faceSize), 1};
+    }
+
+    vkCmdCopyBufferToImage(commandBuffer,
+                           stagingBuffer.buffer,
+                           image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<uint32_t>(copyRegions.size()),
+                           copyRegions.data());
+
+    // Transition to shader read
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(commandBuffer,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0,
+                         0,
+                         nullptr,
+                         0,
+                         nullptr,
+                         1,
+                         &barrier);
+
+    vkEndCommandBuffer(commandBuffer);
+
+    // Submit and wait
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    vkQueueSubmit(context.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(context.graphicsQueue);
+
+    vkFreeCommandBuffers(context.device, context.commandPool, 1, &commandBuffer);
+    destroyBuffer(context, stagingBuffer);
+
+    // Create cubemap image view
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE; // Native cubemap view
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 6; // All 6 faces
+
+    if (vkCreateImageView(context.device, &viewInfo, nullptr, &imageView) != VK_SUCCESS)
+    {
+        std::cerr << "Failed to create cubemap image view for: " << filepath << "\n";
+        return false;
+    }
+
+    // Create sampler with seamless cubemap filtering
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.anisotropyEnable = VK_TRUE;
+    samplerInfo.maxAnisotropy = 16.0f;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.mipLodBias = 0.0f;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 0.0f;
+
+    if (vkCreateSampler(context.device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS)
+    {
+        std::cerr << "Failed to create cubemap sampler for: " << filepath << "\n";
+        return false;
+    }
+
+    return true;
+}
+
 // Load Earth material textures for NAIF ID 399
+// Now uses native Vulkan cubemaps for hardware-accelerated sampling
 bool loadEarthTextures(VulkanContext &context,
                        const std::string &basePath,
                        const std::string &resolutionFolder,
@@ -3343,6 +3436,7 @@ bool loadEarthTextures(VulkanContext &context,
 
     // Load Earth color texture (monthly Blue Marble) - Binding 4
     // Month is 1-12, texture files are earth_month_01.png, earth_month_02.png, etc.
+    // Now loaded as native cubemap (vertical strip format)
     char monthStr[3];
     std::snprintf(monthStr, sizeof(monthStr), "%02d", currentMonth);
     std::string colorPath = resFolderPath + "/earth_month_" + monthStr + ".png";
@@ -3353,57 +3447,61 @@ bool loadEarthTextures(VulkanContext &context,
         colorPath = resFolderPath + "/earth_month_" + monthStr + ".jpg";
     }
 
-    if (!loadTextureHelper(context,
-                           colorPath,
-                           context.earthColorImage,
-                           context.earthColorImageMemory,
-                           context.earthColorImageView,
-                           context.earthColorSampler))
+    if (!loadCubemapTextureHelper(context,
+                                  colorPath,
+                                  context.earthColorImage,
+                                  context.earthColorImageMemory,
+                                  context.earthColorImageView,
+                                  context.earthColorSampler,
+                                  false)) // LDR
     {
-        std::cerr << "Failed to load Earth color texture: " << colorPath << "\n";
+        std::cerr << "Failed to load Earth color cubemap: " << colorPath << "\n";
         allLoaded = false;
     }
     else
     {
-        std::cout << "Loaded Earth color texture: " << colorPath << "\n";
+        std::cout << "Loaded Earth color cubemap: " << colorPath << "\n";
     }
 
-    // Load Earth normal map - Binding 5
-    std::string normalPath = resFolderPath + "/earth_normal.png";
-    if (!loadTextureHelper(context,
-                           normalPath,
-                           context.earthNormalImage,
-                           context.earthNormalImageMemory,
-                           context.earthNormalImageView,
-                           context.earthNormalSampler))
+    // Load Earth normal map - Binding 5 (native cubemap)
+    std::string normalPath = resFolderPath + "/earth_landmass_normal.png";
+    if (!loadCubemapTextureHelper(context,
+                                  normalPath,
+                                  context.earthNormalImage,
+                                  context.earthNormalImageMemory,
+                                  context.earthNormalImageView,
+                                  context.earthNormalSampler,
+                                  false))
     {
-        std::cerr << "Warning: Failed to load Earth normal map (optional): " << normalPath << "\n";
+        std::cerr << "Warning: Failed to load Earth normal cubemap (optional): " << normalPath << "\n";
         // Normal map is optional - don't fail overall
     }
 
-    // Load Earth nightlights texture - Binding 6
+    // Load Earth nightlights texture - Binding 6 (native cubemap)
     std::string nightlightsPath = resFolderPath + "/earth_nightlights.png";
-    if (!loadTextureHelper(context,
-                           nightlightsPath,
-                           context.earthNightlightsImage,
-                           context.earthNightlightsImageMemory,
-                           context.earthNightlightsImageView,
-                           context.earthNightlightsSampler))
+    if (!loadCubemapTextureHelper(context,
+                                  nightlightsPath,
+                                  context.earthNightlightsImage,
+                                  context.earthNightlightsImageMemory,
+                                  context.earthNightlightsImageView,
+                                  context.earthNightlightsSampler,
+                                  false))
     {
-        std::cerr << "Warning: Failed to load Earth nightlights (optional): " << nightlightsPath << "\n";
+        std::cerr << "Warning: Failed to load Earth nightlights cubemap (optional): " << nightlightsPath << "\n";
         // Nightlights is optional - don't fail overall
     }
 
-    // Load Earth specular/roughness texture - Binding 7
+    // Load Earth specular/roughness texture - Binding 7 (native cubemap)
     std::string specularPath = resFolderPath + "/earth_specular.png";
-    if (!loadTextureHelper(context,
-                           specularPath,
-                           context.earthSpecularImage,
-                           context.earthSpecularImageMemory,
-                           context.earthSpecularImageView,
-                           context.earthSpecularSampler))
+    if (!loadCubemapTextureHelper(context,
+                                  specularPath,
+                                  context.earthSpecularImage,
+                                  context.earthSpecularImageMemory,
+                                  context.earthSpecularImageView,
+                                  context.earthSpecularSampler,
+                                  false))
     {
-        std::cerr << "Warning: Failed to load Earth specular (optional): " << specularPath << "\n";
+        std::cerr << "Warning: Failed to load Earth specular cubemap (optional): " << specularPath << "\n";
         // Specular is optional - don't fail overall
     }
 
@@ -3412,7 +3510,7 @@ bool loadEarthTextures(VulkanContext &context,
 
     if (context.earthTexturesReady)
     {
-        std::cout << "Earth textures loaded successfully (NAIF ID 399)\n";
+        std::cout << "Earth native cubemaps loaded successfully (NAIF ID 399)\n";
     }
 
     return context.earthTexturesReady;
