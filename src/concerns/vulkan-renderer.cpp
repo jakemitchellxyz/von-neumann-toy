@@ -154,19 +154,33 @@ void RenderFrame(VulkanRendererState &state)
     // Update SSBO buffer with current UIState from AppState
     updateSSBOBuffer(state.context, APP_STATE.uiState);
 
+    // Reset min distance SSBO to large value before rendering
+    // Shader will write minimum distance to terrain for camera collision detection
+    resetMinDistanceOutput(state.context);
+
+    // ==================================
+    // Capture frame state snapshot
+    // ==================================
+    // Capture all time-sensitive state ONCE at the start of the frame
+    // This prevents temporal artifacts from Julian Date changing mid-frame
+    const float aspectRatio = static_cast<float>(state.width) / static_cast<float>(state.height);
+    constexpr float nearPlane = 0.1f;
+    constexpr float farPlane = 100000.0f;
+
+    // Capture push constants once - these will be used consistently throughout the frame
+    const WorldPushConstants worldConstants = APP_STATE.worldState.toPushConstants();
+    const InputPushConstants inputConstants = g_input.getState().toPushConstants();
+    const CameraPushConstants cameraConstants =
+        APP_STATE.worldState.toCameraPushConstants(aspectRatio, nearPlane, farPlane);
+
     // Update celestial objects SSBO with frustum-culled objects
     if (!APP_STATE.worldState.celestialObjects.empty())
     {
-        // Get camera matrices for frustum culling
-        float aspectRatio = static_cast<float>(state.width) / static_cast<float>(state.height);
-        constexpr float nearPlane = 0.1f;
-        constexpr float farPlane = 100000.0f;
-        CameraPushConstants camConst = APP_STATE.worldState.toCameraPushConstants(aspectRatio, nearPlane, farPlane);
-
         updateCelestialObjectsSSBO(state.context,
                                    APP_STATE.worldState.celestialObjects,
-                                   camConst.viewMatrix,
-                                   camConst.projectionMatrix);
+                                   cameraConstants.viewMatrix,
+                                   cameraConstants.projectionMatrix,
+                                   APP_STATE.hoverState.selectedNaifId);
     }
 
     // Build UI vertex buffer from UI rendering calls
@@ -206,19 +220,10 @@ void RenderFrame(VulkanRendererState &state)
         vkCmdSetViewport(cmd, 0, 1, &viewport);
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-        // Push world constants (converted from WorldState to GPU-specific struct)
-        pushWorldConstants(cmd, state.context.pipelineLayout, APP_STATE.worldState.toPushConstants());
-
-        // Push input constants (mouse position and button state)
-        pushInputConstants(cmd, state.context.pipelineLayout, g_input.getState().toPushConstants());
-
-        // Push camera constants (view/projection matrices, position, FOV)
-        float aspectRatio = static_cast<float>(state.width) / static_cast<float>(state.height);
-        constexpr float nearPlane = 0.1f;     // Default near plane
-        constexpr float farPlane = 100000.0f; // Far enough for solar system scale
-        pushCameraConstants(cmd,
-                            state.context.pipelineLayout,
-                            APP_STATE.worldState.toCameraPushConstants(aspectRatio, nearPlane, farPlane));
+        // Push frame-captured constants (ensures temporal consistency within frame)
+        pushWorldConstants(cmd, state.context.pipelineLayout, worldConstants);
+        pushInputConstants(cmd, state.context.pipelineLayout, inputConstants);
+        pushCameraConstants(cmd, state.context.pipelineLayout, cameraConstants);
 
         // Bind SSBO descriptor set (UIState)
         if (state.context.ssboDescriptorSet != VK_NULL_HANDLE)
@@ -262,11 +267,9 @@ void RenderFrame(VulkanRendererState &state)
         vkCmdSetViewport(cmd, 0, 1, &uiViewport);
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-        // Push world constants (using UI pipeline layout)
-        pushWorldConstants(cmd, state.context.uiPipelineLayout, APP_STATE.worldState.toPushConstants());
-
-        // Push input constants (mouse position and button state)
-        pushInputConstants(cmd, state.context.uiPipelineLayout, g_input.getState().toPushConstants());
+        // Push frame-captured constants (ensures temporal consistency within frame)
+        pushWorldConstants(cmd, state.context.uiPipelineLayout, worldConstants);
+        pushInputConstants(cmd, state.context.uiPipelineLayout, inputConstants);
 
         // Bind SSBO descriptor set (UIState)
         if (state.context.ssboDescriptorSet != VK_NULL_HANDLE)

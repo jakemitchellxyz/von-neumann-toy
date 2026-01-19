@@ -104,6 +104,7 @@ struct VulkanContext
     // ==================================
     VulkanBuffer uiStateSSBO = {};     // SSBO buffer containing UIState (binding 0)
     VulkanBuffer hoverOutputSSBO = {}; // SSBO buffer for hover detection output (binding 1)
+    VulkanBuffer minDistanceSSBO = {}; // SSBO buffer for min surface distance readback (binding 9)
     VkDescriptorSetLayout ssboDescriptorSetLayout = VK_NULL_HANDLE; // Descriptor set layout for SSBOs
     VkDescriptorPool ssboDescriptorPool = VK_NULL_HANDLE;           // Descriptor pool for SSBOs
     VkDescriptorSet ssboDescriptorSet = VK_NULL_HANDLE;             // Descriptor set for SSBO bindings
@@ -149,6 +150,11 @@ struct VulkanContext
     VkDeviceMemory earthSpecularImageMemory = VK_NULL_HANDLE;
     VkImageView earthSpecularImageView = VK_NULL_HANDLE;
     VkSampler earthSpecularSampler = VK_NULL_HANDLE;
+    // Binding 8: Earth heightmap texture (for parallax/displacement)
+    VkImage earthHeightmapImage = VK_NULL_HANDLE;
+    VkDeviceMemory earthHeightmapImageMemory = VK_NULL_HANDLE;
+    VkImageView earthHeightmapImageView = VK_NULL_HANDLE;
+    VkSampler earthHeightmapSampler = VK_NULL_HANDLE;
     bool earthTexturesReady = false;
 };
 
@@ -250,12 +256,18 @@ void updateSSBOBuffer(VulkanContext &context, const UIState &state);
 // Read hover output from SSBO (returns material ID at mouse position, 0 = no hit)
 uint32_t readHoverOutput(VulkanContext &context);
 
+// Read minimum surface distance from SSBO (for camera step limiting)
+float readMinSurfaceDistance(VulkanContext &context);
+
 // Wait for the current frame's fence (ensures previous frame's GPU work is complete)
 // Call this before accessing buffers written by the GPU
 void waitForCurrentFrameFence(VulkanContext &context);
 
 // Reset hover output SSBO to 0 (call before rendering)
 void resetHoverOutput(VulkanContext &context);
+
+// Reset min distance SSBO to large value (call before rendering)
+void resetMinDistanceOutput(VulkanContext &context);
 
 // Push world state constants to command buffer
 // Takes WorldPushConstants directly (use WorldState::toPushConstants() to convert)
@@ -274,11 +286,13 @@ void pushCameraConstants(VkCommandBuffer cmd, VkPipelineLayout layout, const Cam
 // Update celestial objects SSBO with frustum-culled objects
 // objects: vector of CelestialObject structs
 // viewMatrix, projMatrix: camera matrices for frustum culling
-// Only objects visible in the frustum are sent to the GPU
+// selectedNaifId: NAIF ID of selected body (always included, never culled)
+// Only objects visible in the frustum (plus selected) are sent to the GPU
 void updateCelestialObjectsSSBO(VulkanContext &context,
                                 const std::vector<CelestialObject> &objects,
                                 const glm::mat4 &viewMatrix,
-                                const glm::mat4 &projMatrix);
+                                const glm::mat4 &projMatrix,
+                                int32_t selectedNaifId = 0);
 
 // ==================================
 // Skybox Texture Functions

@@ -508,6 +508,9 @@ int main()
                     glm::vec3 bodyPos = obj.position;
                     float bodyRadius = obj.radius;
 
+                    // Store the selected body's radius for movement scaling
+                    APP_STATE.hoverState.selectedBodyRadius = bodyRadius;
+
                     // Direction from sun to body (camera will be on this line, between sun and body)
                     glm::vec3 sunToBody = bodyPos - sunPos;
                     float sunDist = glm::length(sunToBody);
@@ -613,6 +616,47 @@ int main()
             }
         }
 
+        // ====================================
+        // Handle scroll wheel for camera movement
+        // ====================================
+        // Scroll moves camera forward/backward along its forward vector
+        // Base movement is proportional to selected body's radius
+        // Movement is capped by maxCameraStep to prevent clipping through terrain
+        if (std::abs(inputState.scrollY) > 0.001)
+        {
+            // Get camera forward direction in world space
+            glm::vec3 forward = APP_STATE.worldState.camera.getFront();
+
+            // Calculate movement distance:
+            // - Base step is proportional to selected body's radius (larger body = larger steps)
+            // - scrollY positive = scroll up = zoom in (move forward)
+            // - scrollY negative = scroll down = zoom out (move backward)
+            // - Capped by maxCameraStep to prevent terrain penetration
+            float bodyRadius = APP_STATE.hoverState.selectedBodyRadius;
+            float baseStep =
+                static_cast<float>(inputState.scrollY) * bodyRadius * APP_STATE.worldState.scrollSpeedMultiplier;
+            float clampedStep =
+                glm::clamp(baseStep, -APP_STATE.worldState.maxCameraStep, APP_STATE.worldState.maxCameraStep);
+
+            // Apply movement
+            glm::vec3 movement = forward * clampedStep;
+            APP_STATE.worldState.camera.position += movement;
+
+            // If following a body, update the offset as well
+            if (APP_STATE.hoverState.followingSelected && APP_STATE.hoverState.selectedNaifId != 0)
+            {
+                for (const auto &obj : APP_STATE.worldState.celestialObjects)
+                {
+                    if (obj.naifId == APP_STATE.hoverState.selectedNaifId)
+                    {
+                        // Recalculate offset from body to new camera position
+                        APP_STATE.hoverState.cameraOffset = APP_STATE.worldState.camera.position - obj.position;
+                        break;
+                    }
+                }
+            }
+        }
+
         // Update last mouse position
         lastMouseX = currentMouseX;
         lastMouseY = currentMouseY;
@@ -620,6 +664,31 @@ int main()
 
         // Render frame - UI will read hover state from APP_STATE to display tooltip
         RenderFrame(screenState);
+
+        // Read back min distance from GPU for camera collision detection
+        // This gives us the closest distance to displaced terrain from the previous frame
+        float minDist = readMinSurfaceDistance(screenState.vulkanRenderer.context);
+        APP_STATE.worldState.minSurfaceDistance = minDist;
+
+        // Update maxCameraStep based on proximity to terrain
+        // The max step is the smaller of:
+        // 1. Distance-based limit (prevents clipping through terrain)
+        // 2. Radius-based limit (scales movement to body size)
+        constexpr float COLLISION_MARGIN = 0.5f; // Only allow moving 50% of the way to terrain per scroll
+        constexpr float MIN_STEP = 0.00001f;     // Minimum step size (prevents getting stuck)
+
+        float bodyRadius = APP_STATE.hoverState.selectedBodyRadius;
+
+        // Distance-based limit: fraction of distance to terrain
+        float distanceLimit = minDist * COLLISION_MARGIN;
+
+        // Radius-based limit: when far from terrain, cap at body radius
+        // This ensures movement feels natural relative to the body's scale
+        float radiusLimit = bodyRadius * APP_STATE.worldState.scrollSpeedMultiplier;
+
+        // Use the smaller of the two limits
+        float newMaxStep = glm::min(distanceLimit, radiusLimit);
+        APP_STATE.worldState.maxCameraStep = glm::max(newMaxStep, MIN_STEP);
 
         // Propagate shutdown signal to renderer
         if (g_shouldShutdown)

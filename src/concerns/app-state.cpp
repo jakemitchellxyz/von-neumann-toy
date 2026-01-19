@@ -30,6 +30,11 @@ AppState::AppState() : m_runningTextureResolution(1), m_hasUnsavedChanges(false)
     worldState.camera.roll = 0.0f;
     worldState.camera.fov = 60.0f; // Default 60 degrees FOV
 
+    // Initialize camera movement control
+    worldState.maxCameraStep = 1.0f;         // Default max step (will be adjusted dynamically)
+    worldState.minSurfaceDistance = 1000.0f; // Start with large distance (no terrain nearby)
+    worldState.scrollSpeedMultiplier = 0.1f; // Base scroll sensitivity
+
     // Initialize UIState with defaults
     // Visualization toggles (all off by default)
     uiState.showOrbits = 0;

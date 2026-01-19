@@ -162,6 +162,19 @@ struct WorldState
     // Add additional CPU-side fields here as needed
     bool isPaused; // Whether simulation is paused
 
+    // Camera movement control
+    // maxCameraStep: Maximum distance the camera can move per scroll tick
+    // This is dynamically adjusted based on distance to terrain surfaces
+    // Starts at a large value and shrinks as camera approaches surfaces
+    float maxCameraStep = 1.0f;
+
+    // Minimum surface distance from last frame (read back from GPU)
+    // Used to calculate maxCameraStep for terrain collision avoidance
+    float minSurfaceDistance = 1000.0f;
+
+    // Base scroll speed multiplier (user-adjustable)
+    float scrollSpeedMultiplier = 0.1f;
+
     // Camera state - position, orientation, and FOV
     // Camera controller modifies position/orientation, UI controls FOV
     CameraState camera;
@@ -262,13 +275,14 @@ struct UIState
 // Used for tooltip display and camera follow
 struct HoverState
 {
-    int32_t hoveredNaifId = 0;      // NAIF ID of body mouse is over (0 = none)
-    std::string hoveredBodyName;    // Name of hovered body for tooltip
-    int32_t selectedNaifId = 0;     // NAIF ID of selected body (0 = none)
-    std::string selectedBodyName;   // Name of selected body
-    bool followingSelected = false; // True if camera is following selected body
-    float followDistance = 3.0f;    // Distance from body in radii
-    glm::vec3 cameraOffset{0.0f};   // Offset from body center to camera (used for orbit)
+    int32_t hoveredNaifId = 0;       // NAIF ID of body mouse is over (0 = none)
+    std::string hoveredBodyName;     // Name of hovered body for tooltip
+    int32_t selectedNaifId = 0;      // NAIF ID of selected body (0 = none)
+    std::string selectedBodyName;    // Name of selected body
+    float selectedBodyRadius = 1.0f; // Radius of selected body (for movement scaling)
+    bool followingSelected = false;  // True if camera is following selected body
+    float followDistance = 3.0f;     // Distance from body in radii
+    glm::vec3 cameraOffset{0.0f};    // Offset from body center to camera (used for orbit)
 };
 
 // Texture resolution enum values (matching existing TextureResolution enum)

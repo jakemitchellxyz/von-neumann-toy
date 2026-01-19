@@ -269,13 +269,22 @@ private:
     // Sets width and height to the loaded dimensions
     static float *loadGeoTiffElevation(const std::string &filepath, int &width, int &height);
 
-    // Generate heightmap from elevation data
+    // Generate 8-bit heightmap from elevation data (legacy)
     // Normalizes elevation values to 0-255 range
     static unsigned char *generateHeightmap(const float *elevation,
                                             int srcWidth,
                                             int srcHeight,
                                             int dstWidth,
                                             int dstHeight);
+
+    // Generate HDR heightmap from elevation data (combined landmass + bathymetry)
+    // Normalizes elevation values between Mariana Trench (-10,994m) and Mt. Everest (+8,849m)
+    // Output: 0.0 = Mariana Trench, ~0.554 = sea level, 1.0 = Mt. Everest
+    static float *generateHeightmapHDR(const float *elevation,
+                                       int srcWidth,
+                                       int srcHeight,
+                                       int dstWidth,
+                                       int dstHeight);
 
     // Generate normal map from heightmap using Sobel operators
     // Returns RGB data where R=X, G=Y, B=Z of surface normal

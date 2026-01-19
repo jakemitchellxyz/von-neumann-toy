@@ -1945,12 +1945,12 @@ void destroyBuffer(VulkanContext &context, VulkanBuffer &buffer)
 // SSBO and Push Constants Implementation
 // ==================================
 
-// Create SSBO descriptor set layout for UIState, HoverOutput, CelestialObjects, Skybox, and Earth textures
+// Create SSBO descriptor set layout for UIState, HoverOutput, CelestialObjects, Skybox, Earth textures, and MinDistance
 bool createSSBODescriptorSetLayout(VulkanContext &context)
 {
-    // Eight bindings: UIState (0), HoverOutput (1), CelestialObjects (2), SkyboxCubemap (3),
-    // EarthColor (4), EarthNormal (5), EarthNightlights (6), EarthSpecular (7)
-    std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
+    // Ten bindings: UIState (0), HoverOutput (1), CelestialObjects (2), SkyboxCubemap (3),
+    // EarthColor (4), EarthNormal (5), EarthNightlights (6), EarthSpecular (7), EarthHeightmap (8), MinDistance (9)
+    std::array<VkDescriptorSetLayoutBinding, 10> bindings{};
 
     // Binding 0: UIState SSBO (read by vertex/fragment shaders)
     bindings[0].binding = 0;
@@ -2009,6 +2009,20 @@ bool createSSBODescriptorSetLayout(VulkanContext &context)
     bindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     bindings[7].pImmutableSamplers = nullptr;
 
+    // Binding 8: Earth Heightmap texture (for parallax displacement)
+    bindings[8].binding = 8;
+    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[8].descriptorCount = 1;
+    bindings[8].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[8].pImmutableSamplers = nullptr;
+
+    // Binding 9: MinDistance SSBO (written by fragment shader for camera collision)
+    bindings[9].binding = 9;
+    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[9].descriptorCount = 1;
+    bindings[9].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[9].pImmutableSamplers = nullptr;
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -2030,6 +2044,16 @@ struct HoverOutput
     uint32_t hitMaterialID; // 0 = no hit, >0 = material ID of hit object
 };
 
+// Min distance output struct (matches shader layout)
+// Used for camera collision detection - shader writes min distance to terrain
+struct MinDistanceOutput
+{
+    uint32_t minDistanceBits; // Float stored as bits for atomic operations (use intBitsToFloat in shader)
+};
+
+// Large float value for initializing min distance (represents "no terrain nearby")
+constexpr float MIN_DISTANCE_RESET_VALUE = 1000000.0f;
+
 // Create SSBO buffer and descriptor set
 bool createSSBOResources(VulkanContext &context)
 {
@@ -2039,16 +2063,16 @@ bool createSSBOResources(VulkanContext &context)
         return false;
     }
 
-    // Create descriptor pool (need 3 SSBOs + 5 combined image samplers for skybox + earth textures)
+    // Create descriptor pool (need 4 SSBOs + 6 combined image samplers for skybox + earth textures)
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
 
-    // Storage buffers: UIState + HoverOutput + CelestialObjects
+    // Storage buffers: UIState + HoverOutput + CelestialObjects + MinDistance
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[0].descriptorCount = 3;
+    poolSizes[0].descriptorCount = 4;
 
-    // Combined image samplers: SkyboxCubemap (1) + Earth textures (4)
+    // Combined image samplers: SkyboxCubemap (1) + Earth textures (5)
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = 5;
+    poolSizes[1].descriptorCount = 6;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -2119,6 +2143,19 @@ bool createSSBOResources(VulkanContext &context)
     std::memcpy(mapped, &zeroCount, sizeof(uint32_t));
     vkUnmapMemory(context.device, context.celestialObjectsSSBO.allocation);
 
+    // Create SSBO buffer for MinDistance (binding 9)
+    context.minDistanceSSBO = createBuffer(context,
+                                           sizeof(MinDistanceOutput),
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                           nullptr);
+
+    if (context.minDistanceSSBO.buffer == VK_NULL_HANDLE)
+    {
+        std::cerr << "Failed to create MinDistance SSBO buffer!" << "\n";
+        return false;
+    }
+
     // Allocate descriptor set
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -2132,8 +2169,8 @@ bool createSSBOResources(VulkanContext &context)
         return false;
     }
 
-    // Update descriptor set with all three bindings
-    std::array<VkDescriptorBufferInfo, 3> bufferInfos{};
+    // Update descriptor set with all four SSBO bindings
+    std::array<VkDescriptorBufferInfo, 4> bufferInfos{};
 
     // Binding 0: UIState
     bufferInfos[0].buffer = context.uiStateSSBO.buffer;
@@ -2150,7 +2187,12 @@ bool createSSBOResources(VulkanContext &context)
     bufferInfos[2].offset = 0;
     bufferInfos[2].range = CELESTIAL_SSBO_SIZE;
 
-    std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
+    // Binding 9: MinDistance
+    bufferInfos[3].buffer = context.minDistanceSSBO.buffer;
+    bufferInfos[3].offset = 0;
+    bufferInfos[3].range = sizeof(MinDistanceOutput);
+
+    std::array<VkWriteDescriptorSet, 4> descriptorWrites{};
 
     // Write for binding 0 (UIState)
     descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2179,6 +2221,15 @@ bool createSSBOResources(VulkanContext &context)
     descriptorWrites[2].descriptorCount = 1;
     descriptorWrites[2].pBufferInfo = &bufferInfos[2];
 
+    // Write for binding 9 (MinDistance)
+    descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrites[3].dstSet = context.ssboDescriptorSet;
+    descriptorWrites[3].dstBinding = 9;
+    descriptorWrites[3].dstArrayElement = 0;
+    descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    descriptorWrites[3].descriptorCount = 1;
+    descriptorWrites[3].pBufferInfo = &bufferInfos[3];
+
     vkUpdateDescriptorSets(context.device,
                            static_cast<uint32_t>(descriptorWrites.size()),
                            descriptorWrites.data(),
@@ -2191,9 +2242,12 @@ bool createSSBOResources(VulkanContext &context)
     // Initialize HoverOutput to 0 (no hit)
     resetHoverOutput(context);
 
+    // Initialize MinDistance to large value (no terrain nearby)
+    resetMinDistanceOutput(context);
+
     std::cout << "SSBO resources created successfully (UIState: " << sizeof(UIState)
               << " bytes, HoverOutput: " << sizeof(HoverOutput) << " bytes, CelestialObjects: " << CELESTIAL_SSBO_SIZE
-              << " bytes)" << "\n";
+              << " bytes, MinDistance: " << sizeof(MinDistanceOutput) << " bytes)" << "\n";
     return true;
 }
 
@@ -2242,6 +2296,43 @@ void resetHoverOutput(VulkanContext &context)
     vkMapMemory(context.device, context.hoverOutputSSBO.allocation, 0, sizeof(HoverOutput), 0, &mapped);
     std::memcpy(mapped, &reset, sizeof(HoverOutput));
     vkUnmapMemory(context.device, context.hoverOutputSSBO.allocation);
+}
+
+// Read minimum surface distance from SSBO (for camera collision detection)
+float readMinSurfaceDistance(VulkanContext &context)
+{
+    if (context.minDistanceSSBO.buffer == VK_NULL_HANDLE)
+    {
+        return MIN_DISTANCE_RESET_VALUE;
+    }
+
+    void *mapped;
+    vkMapMemory(context.device, context.minDistanceSSBO.allocation, 0, sizeof(MinDistanceOutput), 0, &mapped);
+    uint32_t bits = reinterpret_cast<MinDistanceOutput *>(mapped)->minDistanceBits;
+    vkUnmapMemory(context.device, context.minDistanceSSBO.allocation);
+
+    // Convert bits back to float (shader stores float as bits for atomic operations)
+    float result;
+    std::memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+// Reset min distance SSBO to large value (call before rendering)
+void resetMinDistanceOutput(VulkanContext &context)
+{
+    if (context.minDistanceSSBO.buffer == VK_NULL_HANDLE)
+    {
+        return;
+    }
+
+    MinDistanceOutput reset{};
+    // Store large float value as bits
+    std::memcpy(&reset.minDistanceBits, &MIN_DISTANCE_RESET_VALUE, sizeof(float));
+
+    void *mapped;
+    vkMapMemory(context.device, context.minDistanceSSBO.allocation, 0, sizeof(MinDistanceOutput), 0, &mapped);
+    std::memcpy(mapped, &reset, sizeof(MinDistanceOutput));
+    vkUnmapMemory(context.device, context.minDistanceSSBO.allocation);
 }
 
 // Wait for the current frame's fence (ensures previous frame's GPU work is complete)
@@ -2378,7 +2469,8 @@ static bool isSphereInFrustum(const FrustumPlane planes[6], float x, float y, fl
 void updateCelestialObjectsSSBO(VulkanContext &context,
                                 const std::vector<CelestialObject> &objects,
                                 const glm::mat4 &viewMatrix,
-                                const glm::mat4 &projMatrix)
+                                const glm::mat4 &projMatrix,
+                                int32_t selectedNaifId)
 {
     if (context.celestialObjectsSSBO.buffer == VK_NULL_HANDLE)
     {
@@ -2407,12 +2499,17 @@ void updateCelestialObjectsSSBO(VulkanContext &context,
     constexpr size_t HEADER_SIZE = 16;
 
     // Filter objects by frustum visibility
+    // Always include selected object (never cull it)
     std::vector<const CelestialObject *> visibleObjects;
     visibleObjects.reserve(objects.size());
 
     for (const auto &obj : objects)
     {
-        if (isSphereInFrustum(frustumPlanes, obj.position.x, obj.position.y, obj.position.z, obj.radius))
+        // Always include the selected object, even if outside frustum
+        bool isSelected = (selectedNaifId != 0 && obj.naifId == selectedNaifId);
+        bool isInFrustum = isSphereInFrustum(frustumPlanes, obj.position.x, obj.position.y, obj.position.z, obj.radius);
+
+        if (isSelected || isInFrustum)
         {
             visibleObjects.push_back(&obj);
             if (visibleObjects.size() >= MAX_CELESTIAL_OBJECTS)
@@ -3505,6 +3602,35 @@ bool loadEarthTextures(VulkanContext &context,
         // Specular is optional - don't fail overall
     }
 
+    // Load Earth heightmap texture - Binding 8 (native cubemap for terrain displacement)
+    // NEW: Uses combined HDR elevation data (landmass + bathymetry)
+    // Normalized range: 0.0 = Mariana Trench (-10,994m), ~0.554 = sea level, 1.0 = Everest (+8,849m)
+    std::string heightmapPath = resFolderPath + "/earth_elevation.hdr";
+
+    // Fall back to legacy PNG if HDR not found
+    bool isHDR = std::ifstream(heightmapPath).good();
+    if (!isHDR)
+    {
+        heightmapPath = resFolderPath + "/earth_landmass_heightmap.png";
+        std::cout << "HDR elevation not found, falling back to legacy PNG heightmap\n";
+    }
+
+    if (!loadCubemapTextureHelper(context,
+                                  heightmapPath,
+                                  context.earthHeightmapImage,
+                                  context.earthHeightmapImageMemory,
+                                  context.earthHeightmapImageView,
+                                  context.earthHeightmapSampler,
+                                  isHDR))
+    {
+        std::cerr << "Warning: Failed to load Earth heightmap cubemap (optional): " << heightmapPath << "\n";
+        // Heightmap is optional - terrain will appear as smooth sphere without it
+    }
+    else if (isHDR)
+    {
+        std::cout << "Loaded HDR elevation cubemap: earth_elevation.hdr\n";
+    }
+
     // Mark as ready if at least the color texture loaded
     context.earthTexturesReady = (context.earthColorImage != VK_NULL_HANDLE);
 
@@ -3525,7 +3651,8 @@ void updateEarthDescriptorSet(VulkanContext &context)
     }
 
     std::vector<VkWriteDescriptorSet> writes;
-    std::vector<VkDescriptorImageInfo> imageInfos(4); // Store image infos to keep them alive
+    std::vector<VkDescriptorImageInfo> imageInfos(
+        5); // Store image infos to keep them alive (Color, Normal, Nightlights, Specular, Heightmap)
 
     // Binding 4: Earth Color texture
     if (context.earthColorImage != VK_NULL_HANDLE)
@@ -3599,6 +3726,24 @@ void updateEarthDescriptorSet(VulkanContext &context)
         writes.push_back(write);
     }
 
+    // Binding 8: Earth Heightmap (for terrain displacement)
+    if (context.earthHeightmapImage != VK_NULL_HANDLE)
+    {
+        imageInfos[4].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[4].imageView = context.earthHeightmapImageView;
+        imageInfos[4].sampler = context.earthHeightmapSampler;
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = context.ssboDescriptorSet;
+        write.dstBinding = 8;
+        write.dstArrayElement = 0;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo = &imageInfos[4];
+        writes.push_back(write);
+    }
+
     if (!writes.empty())
     {
         vkUpdateDescriptorSets(context.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
@@ -3661,6 +3806,12 @@ void cleanupEarthTextures(VulkanContext &context)
                          context.earthSpecularImageMemory,
                          context.earthSpecularImageView,
                          context.earthSpecularSampler);
+
+    cleanupTextureHelper(context,
+                         context.earthHeightmapImage,
+                         context.earthHeightmapImageMemory,
+                         context.earthHeightmapImageView,
+                         context.earthHeightmapSampler);
 
     context.earthTexturesReady = false;
 }

@@ -14,8 +14,7 @@
 // Constructor
 // ==================================
 CameraController::CameraController()
-    : moveSpeed(150.0f), rotateSpeed(0.15f), rollSpeed(1.0f),
-      panSpeed(15.0f), scrollSpeed(500.0f), orbitSpeed(0.005f),
+    : moveSpeed(150.0f), rotateSpeed(0.15f), rollSpeed(1.0f), panSpeed(15.0f), scrollSpeed(500.0f), orbitSpeed(0.005f),
       maxRayDistance(static_cast<float>(PLUTO_SMA_AU * UNITS_PER_AU)), hoveredBody(nullptr), selectedBody(nullptr),
       contextMenuOpen(false), contextMenuBody(nullptr), contextMenuX(0.0), contextMenuY(0.0), isFocused(false),
       focusIsLagrangePoint(false), focusOffset(0.0f), followMode(CameraFollowMode::Fixed), lastJulianDate(0.0),
@@ -72,7 +71,8 @@ void CameraController::initializeForEarth(const glm::vec3 &earthPos, float earth
 
     initialized = true;
 
-    std::cout << "Camera positioned at: (" << camera().position.x << ", " << camera().position.y << ", " << camera().position.z << ")\n";
+    std::cout << "Camera positioned at: (" << camera().position.x << ", " << camera().position.y << ", "
+              << camera().position.z << ")\n";
 }
 
 // ==================================
@@ -614,9 +614,9 @@ void CameraController::clampSurfaceOrientation()
 // So 1 display unit ≈ 249,330 km
 // 1 meter ≈ 4.0e-9 display units
 // 2 meters ≈ 8.0e-9 display units
-static constexpr float DEFAULT_NEAR_PLANE = 0.1f;  // Used when far from any surface
-static constexpr float MIN_NEAR_PLANE = 8.0e-9f;   // ~2 meters (allows ground-level viewing)
-static constexpr float MIN_ALTITUDE = 2.0e-6f;     // ~0.5 km minimum altitude from surface
+static constexpr float DEFAULT_NEAR_PLANE = 0.1f; // Used when far from any surface
+static constexpr float MIN_NEAR_PLANE = 8.0e-9f;  // ~2 meters (allows ground-level viewing)
+static constexpr float MIN_ALTITUDE = 2.0e-6f;    // ~0.5 km minimum altitude from surface
 static constexpr float NEAR_PLANE_ALTITUDE_RATIO =
     0.05f; // Near plane = 5% of altitude (more stable for very close views)
 
@@ -1253,8 +1253,9 @@ void CameraController::handleCursorPos(GLFWwindow *window, double xpos, double y
 
             // Convert back to Cartesian coordinates
             float cosPhi = cos(phi);
-            camera().position = selectedBody->position +
-                       glm::vec3(distance * cosPhi * cos(theta), distance * sin(phi), distance * cosPhi * sin(theta));
+            camera().position =
+                selectedBody->position +
+                glm::vec3(distance * cosPhi * cos(theta), distance * sin(phi), distance * cosPhi * sin(theta));
 
             // Point camera at the body
             glm::vec3 toBody = glm::normalize(selectedBody->position - camera().position);

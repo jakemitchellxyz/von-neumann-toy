@@ -266,6 +266,7 @@ float *EarthMaterial::loadGeoTiffElevation(const std::string &filepath, int &wid
     return elevation;
 }
 
+// Generate 8-bit heightmap (legacy - kept for normal map generation)
 unsigned char *EarthMaterial::generateHeightmap(const float *elevation,
                                                 int srcWidth,
                                                 int srcHeight,
@@ -342,6 +343,104 @@ unsigned char *EarthMaterial::generateHeightmap(const float *elevation,
             // Normalize to 0-255
             float normalized = (value - minElev) / range;
             heightmap[y * dstWidth + x] = static_cast<unsigned char>(std::clamp(normalized * 255.0f, 0.0f, 255.0f));
+        }
+    }
+
+    return heightmap;
+}
+
+// ============================================================================
+// Combined HDR Heightmap Generation (Landmass + Bathymetry)
+// ============================================================================
+// Generates a single-channel HDR heightmap normalized between:
+// - Mariana Trench: -10,994 meters (Challenger Deep)
+// - Mt. Everest:    +8,849 meters
+// Output range [0, 1] where:
+// - 0.0 = Mariana Trench (-10,994m)
+// - ~0.555 = Sea level (0m)
+// - 1.0 = Mt. Everest (+8,849m)
+
+// Constants for elevation normalization
+constexpr float MARIANA_TRENCH_DEPTH = -10994.0f;  // Challenger Deep in meters
+constexpr float EVEREST_HEIGHT = 8849.0f;          // Mt. Everest in meters
+constexpr float ELEVATION_RANGE = EVEREST_HEIGHT - MARIANA_TRENCH_DEPTH;  // ~19,843m total range
+constexpr float SEA_LEVEL_NORMALIZED = -MARIANA_TRENCH_DEPTH / ELEVATION_RANGE;  // ~0.554
+
+float *EarthMaterial::generateHeightmapHDR(const float *elevation,
+                                           int srcWidth,
+                                           int srcHeight,
+                                           int dstWidth,
+                                           int dstHeight)
+{
+    std::cout << "  Generating HDR heightmap with real-world elevation range..." << '\n';
+    std::cout << "  Mariana Trench: " << MARIANA_TRENCH_DEPTH << "m (normalized: 0.0)" << '\n';
+    std::cout << "  Sea Level:      0m (normalized: " << SEA_LEVEL_NORMALIZED << ")" << '\n';
+    std::cout << "  Mt. Everest:    " << EVEREST_HEIGHT << "m (normalized: 1.0)" << '\n';
+
+    // Find actual min/max in source data for statistics
+    float actualMin = elevation[0];
+    float actualMax = elevation[0];
+    for (int i = 0; i < srcWidth * srcHeight; i++)
+    {
+        float v = elevation[i];
+        if (v > -12000.0f && v < 10000.0f) // Skip NODATA
+        {
+            actualMin = std::min(actualMin, v);
+            actualMax = std::max(actualMax, v);
+        }
+    }
+    std::cout << "  Source data range: " << actualMin << "m to " << actualMax << "m" << '\n';
+
+    // Allocate output buffer (single channel float)
+    float *heightmap = new (std::nothrow) float[static_cast<size_t>(dstWidth) * dstHeight];
+    if (!heightmap)
+    {
+        std::cerr << "Failed to allocate HDR heightmap buffer" << '\n';
+        return nullptr;
+    }
+
+    // Resample and normalize to real-world elevation range
+    float xRatio = static_cast<float>(srcWidth) / dstWidth;
+    float yRatio = static_cast<float>(srcHeight) / dstHeight;
+
+    for (int y = 0; y < dstHeight; y++)
+    {
+        float srcY = y * yRatio;
+        int y0 = static_cast<int>(srcY);
+        int y1 = std::min(y0 + 1, srcHeight - 1);
+        float yFrac = srcY - y0;
+
+        for (int x = 0; x < dstWidth; x++)
+        {
+            float srcX = x * xRatio;
+            int x0 = static_cast<int>(srcX);
+            int x1 = std::min(x0 + 1, srcWidth - 1);
+            float xFrac = srcX - x0;
+
+            // Bilinear interpolation
+            float v00 = elevation[y0 * srcWidth + x0];
+            float v10 = elevation[y0 * srcWidth + x1];
+            float v01 = elevation[y1 * srcWidth + x0];
+            float v11 = elevation[y1 * srcWidth + x1];
+
+            // Handle NODATA values - treat as sea level
+            if (v00 < -12000.0f || v00 > 10000.0f) v00 = 0.0f;
+            if (v10 < -12000.0f || v10 > 10000.0f) v10 = 0.0f;
+            if (v01 < -12000.0f || v01 > 10000.0f) v01 = 0.0f;
+            if (v11 < -12000.0f || v11 > 10000.0f) v11 = 0.0f;
+
+            float v0 = v00 * (1 - xFrac) + v10 * xFrac;
+            float v1 = v01 * (1 - xFrac) + v11 * xFrac;
+            float elevationMeters = v0 * (1 - yFrac) + v1 * yFrac;
+
+            // Clamp to real-world range
+            elevationMeters = std::clamp(elevationMeters, MARIANA_TRENCH_DEPTH, EVEREST_HEIGHT);
+
+            // Normalize: 0 = Mariana Trench, 1 = Everest
+            // Sea level (0m) maps to ~0.554
+            float normalized = (elevationMeters - MARIANA_TRENCH_DEPTH) / ELEVATION_RANGE;
+            
+            heightmap[y * dstWidth + x] = normalized;
         }
     }
 
@@ -595,15 +694,19 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     // Create output directory
     std::filesystem::create_directories(outputPath);
 
-    // Output files (cubemap vertical strip format)
-    std::string heightmapPath = outputPath + "/earth_landmass_heightmap.png";
+    // Output files (cubemap 3x2 grid format)
+    // NEW: Combined HDR heightmap (landmass + bathymetry in one file)
+    std::string combinedHeightmapPath = outputPath + "/earth_elevation.hdr";
     std::string normalMapPath = outputPath + "/earth_landmass_normal.png";
+    
+    // Legacy files (still generated for backward compatibility)
+    std::string legacyHeightmapPath = outputPath + "/earth_landmass_heightmap.png";
 
     // Print absolute paths for debugging
-    std::cout << "Heightmap will be: " << std::filesystem::absolute(heightmapPath).string() << " (cubemap)" << '\n';
-    std::cout << "Normalmap will be: " << std::filesystem::absolute(normalMapPath).string() << " (cubemap)" << '\n';
+    std::cout << "Combined HDR heightmap: " << std::filesystem::absolute(combinedHeightmapPath).string() << " (cubemap)" << '\n';
+    std::cout << "Normal map: " << std::filesystem::absolute(normalMapPath).string() << " (cubemap)" << '\n';
 
-    if (std::filesystem::exists(heightmapPath) && std::filesystem::exists(normalMapPath))
+    if (std::filesystem::exists(combinedHeightmapPath) && std::filesystem::exists(normalMapPath))
     {
         std::cout << "Elevation textures already exist, skipping." << '\n';
         std::cout << "===================================" << '\n';
@@ -663,14 +766,31 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
         return false;
     }
 
-    std::cout << "Generating heightmap (equirectangular intermediate)..." << '\n';
+    // =========================================================================
+    // Generate Combined HDR Heightmap (Landmass + Bathymetry)
+    // =========================================================================
+    std::cout << "Generating combined HDR heightmap (landmass + bathymetry)..." << '\n';
 
-    // Generate heightmap in equirectangular (intermediate)
-    unsigned char *heightmapEquirect = generateHeightmap(elevation, srcWidth, srcHeight, outWidth, outHeight);
-    if (!heightmapEquirect)
+    float *heightmapHDR = generateHeightmapHDR(elevation, srcWidth, srcHeight, outWidth, outHeight);
+    if (!heightmapHDR)
     {
         delete[] elevation;
-        std::cout << "Failed to generate heightmap" << '\n';
+        std::cout << "Failed to generate HDR heightmap" << '\n';
+        std::cout << "===================================" << '\n';
+        return false;
+    }
+
+    // =========================================================================
+    // Generate Legacy 8-bit Heightmap (for normal map generation)
+    // =========================================================================
+    std::cout << "Generating 8-bit heightmap for normal map..." << '\n';
+
+    unsigned char *heightmap8bit = generateHeightmap(elevation, srcWidth, srcHeight, outWidth, outHeight);
+    if (!heightmap8bit)
+    {
+        delete[] elevation;
+        delete[] heightmapHDR;
+        std::cout << "Failed to generate 8-bit heightmap" << '\n';
         std::cout << "===================================" << '\n';
         return false;
     }
@@ -680,232 +800,21 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     elevation = nullptr;
 
     // =========================================================================
-    // Generate Normal Map from Equirectangular Heightmap
+    // Generate Normal Map from Heightmap
     // =========================================================================
-    std::cout << "Generating normal map from equirectangular heightmap..." << '\n';
+    std::cout << "Generating normal map from heightmap..." << '\n';
 
-    float heightScale = 50.0f;
-    unsigned char *normalMapEquirect = generateNormalMap(heightmapEquirect, outWidth, outHeight, heightScale);
+    // Use a height scale appropriate for the combined range (Mariana to Everest)
+    float heightScale = 100.0f;
+    unsigned char *normalMapEquirect = generateNormalMap(heightmap8bit, outWidth, outHeight, heightScale);
     if (!normalMapEquirect)
     {
-        delete[] heightmapEquirect;
+        delete[] heightmapHDR;
+        delete[] heightmap8bit;
         std::cout << "Failed to generate normal map" << '\n';
         std::cout << "===================================" << '\n';
         return false;
     }
-
-    // =========================================================================
-    // Create Bathymetry Maps (Ocean Floor Depth and Normals)
-    // =========================================================================
-    // ETOPO data includes bathymetry (ocean floor elevation)
-    // We extract this BEFORE masking the terrain to create ocean depth maps
-    // These are used for subsurface scattering calculations
-
-    std::cout << "Extracting bathymetry data..." << '\n';
-
-    // Bathymetry output files
-    std::string bathymetryHeightPath = outputPath + "/earth_bathymetry_heightmap.png";
-    std::string bathymetryNormalPath = outputPath + "/earth_bathymetry_normal.png";
-
-    // Combined normal map output file (for shadows - includes both landmass and bathymetry)
-    std::string combinedNormalPath = outputPath + "/earth_combined_normal.png";
-
-    // CRITICAL: Save original heightmap BEFORE masking for combined normal map generation
-    // This preserves relative curves between land and ocean floor
-    std::vector<unsigned char> originalHeightmap(outWidth * outHeight);
-    for (int i = 0; i < outWidth * outHeight; i++)
-    {
-        originalHeightmap[i] = heightmapEquirect[i];
-    }
-
-    // Create bathymetry buffers (in equirectangular)
-    std::vector<unsigned char> bathymetryHeight(outWidth * outHeight, 128); // Sea level default
-    std::vector<unsigned char> bathymetryNormal(outWidth * outHeight * 3);
-
-    // Initialize normals to flat (pointing up)
-    for (int i = 0; i < outWidth * outHeight; i++)
-    {
-        bathymetryNormal[i * 3 + 0] = 128;
-        bathymetryNormal[i * 3 + 1] = 128;
-        bathymetryNormal[i * 3 + 2] = 255;
-    }
-
-    // =========================================================================
-    // Apply landmass mask to flatten ocean areas (terrain) AND extract bathymetry
-    // =========================================================================
-    // Load landmass mask file (white=land, black=ocean) to detect oceans
-    // Note: The landmass mask may be in cubemap format, so we sample it accordingly
-
-    std::cout << "Applying landmass mask and generating bathymetry..." << '\n';
-
-    // Load or generate landmass mask
-    std::string landmaskPath = outputPath + "/earth_landmass_mask.png";
-    if (!std::filesystem::exists(landmaskPath))
-    {
-        std::cout << "  Landmass mask not found, generating it..." << '\n';
-        if (!preprocessLandmassMask(defaultsPath, outputBasePath, resolution))
-        {
-            std::cout << "  ERROR: Failed to generate landmass mask" << '\n';
-            delete[] heightmapEquirect;
-            delete[] normalMapEquirect;
-            return false;
-        }
-    }
-
-    // Load the landmass mask (will be cubemap format after preprocessing)
-    int maskW, maskH, maskC;
-    unsigned char *maskData = stbi_load(landmaskPath.c_str(), &maskW, &maskH, &maskC, 1);
-
-    if (!maskData)
-    {
-        std::cout << "  ERROR: Failed to load landmass mask: " << landmaskPath << '\n';
-        delete[] heightmapEquirect;
-        delete[] normalMapEquirect;
-        return false;
-    }
-
-    // Determine if mask is cubemap (height = 6 * width) or equirectangular (height = width / 2)
-    bool maskIsCubemap = isCubemapGridDimensions(maskW, maskH);
-    int maskFaceSize = maskIsCubemap ? getFaceSizeFromGridDimensions(maskW, maskH) : 0;
-
-    std::cout << "  Loaded landmass mask: " << maskW << "x" << maskH
-              << (maskIsCubemap ? " (cubemap)" : " (equirectangular/sinusoidal)") << '\n';
-
-    int oceanPixels = 0;
-    int landPixels = 0;
-
-    // First pass: identify water pixels using mask and compute statistics
-    std::vector<bool> isOcean(outWidth * outHeight, false);
-    float minOceanDepth = 255.0f, maxOceanDepth = 0.0f;
-
-    for (int y = 0; y < outHeight; y++)
-    {
-        for (int x = 0; x < outWidth; x++)
-        {
-            unsigned char maskVal = 255; // Default to land
-
-            if (maskIsCubemap)
-            {
-                // Convert equirectangular UV to direction, then sample cubemap mask
-                float u = static_cast<float>(x) / (outWidth - 1);
-                float v = static_cast<float>(y) / (outHeight - 1);
-                float dirX, dirY, dirZ;
-                equirectangularUVToDirection(u, v, dirX, dirY, dirZ);
-
-                // Sample cubemap mask using the direction
-                sampleCubemapStripUChar(maskData, maskFaceSize, 1, dirX, dirY, dirZ, &maskVal);
-            }
-            else
-            {
-                // Sample from mask (sinusoidal or equirectangular space)
-                int mx = static_cast<int>(static_cast<float>(x) / (outWidth - 1) * (maskW - 1));
-                int my = static_cast<int>(static_cast<float>(y) / (outHeight - 1) * (maskH - 1));
-                mx = std::min(mx, maskW - 1);
-                my = std::min(my, maskH - 1);
-                maskVal = maskData[my * maskW + mx];
-            }
-
-            // Mask: 0 = ocean (black), 255 = land (white)
-            bool isWater = (maskVal == 0);
-
-            int dstIdx = y * outWidth + x;
-            isOcean[dstIdx] = isWater;
-
-            if (isWater)
-            {
-                oceanPixels++;
-                float depth = heightmapEquirect[dstIdx];
-                minOceanDepth = std::min(minOceanDepth, depth);
-                maxOceanDepth = std::max(maxOceanDepth, depth);
-            }
-            else
-            {
-                landPixels++;
-            }
-        }
-    }
-
-    stbi_image_free(maskData);
-
-    std::cout << "  Ocean pixels: " << oceanPixels << ", Land pixels: " << landPixels << '\n';
-    std::cout << "  Raw depth range: " << minOceanDepth << " - " << maxOceanDepth << '\n';
-
-    // Second pass: create terrain and bathymetry maps in equirectangular
-    for (int y = 0; y < outHeight; y++)
-    {
-        for (int x = 0; x < outWidth; x++)
-        {
-            int dstIdx = y * outWidth + x;
-
-            if (isOcean[dstIdx])
-            {
-                // === BATHYMETRY: Keep raw ocean floor data ===
-                unsigned char rawHeight = heightmapEquirect[dstIdx];
-
-                // Invert and normalize depth for shader
-                float normalizedDepth = 0.0f;
-                if (rawHeight < 128)
-                {
-                    normalizedDepth = (128.0f - rawHeight) / 128.0f;
-                }
-                bathymetryHeight[dstIdx] = static_cast<unsigned char>(normalizedDepth * 255.0f);
-
-                // Copy raw normal data
-                bathymetryNormal[dstIdx * 3 + 0] = normalMapEquirect[dstIdx * 3 + 0];
-                bathymetryNormal[dstIdx * 3 + 1] = normalMapEquirect[dstIdx * 3 + 1];
-                bathymetryNormal[dstIdx * 3 + 2] = normalMapEquirect[dstIdx * 3 + 2];
-
-                // === TERRAIN: Flatten ocean to sea level ===
-                heightmapEquirect[dstIdx] = 128;
-                normalMapEquirect[dstIdx * 3 + 0] = 128;
-                normalMapEquirect[dstIdx * 3 + 1] = 128;
-                normalMapEquirect[dstIdx * 3 + 2] = 255;
-            }
-            else
-            {
-                // === BATHYMETRY: Land areas masked to sea level ===
-                bathymetryHeight[dstIdx] = 0;
-            }
-        }
-    }
-
-    float oceanPercent = 100.0f * oceanPixels / (outWidth * outHeight);
-    std::cout << "  Processed " << oceanPixels << " ocean pixels (" << oceanPercent << "%)" << '\n';
-
-    // =========================================================================
-    // Generate Bathymetry Normal Map from Bathymetry Heightmap
-    // =========================================================================
-    std::cout << "Generating bathymetry normal map..." << '\n';
-
-    const float bathymetryHeightScale = 11000.0f / 255.0f;
-    unsigned char *bathymetryNormalTemp = generateNormalMap(bathymetryHeight.data(), outWidth, outHeight, bathymetryHeightScale);
-    if (bathymetryNormalTemp)
-    {
-        // Overwrite land areas with flat normals
-        for (int y = 0; y < outHeight; y++)
-        {
-            for (int x = 0; x < outWidth; x++)
-            {
-                int dstIdx = y * outWidth + x;
-                if (!isOcean[dstIdx])
-                {
-                    bathymetryNormalTemp[dstIdx * 3 + 0] = 128;
-                    bathymetryNormalTemp[dstIdx * 3 + 1] = 128;
-                    bathymetryNormalTemp[dstIdx * 3 + 2] = 255;
-                }
-            }
-        }
-        memcpy(bathymetryNormal.data(), bathymetryNormalTemp, outWidth * outHeight * 3);
-        delete[] bathymetryNormalTemp;
-    }
-
-    // =========================================================================
-    // Generate Combined Normal Map (Landmass + Bathymetry) for Shadows
-    // =========================================================================
-    std::cout << "Generating combined normal map (landmass + bathymetry) for shadows..." << '\n';
-
-    float combinedHeightScale = 50.0f;
-    unsigned char *combinedNormalMap = generateNormalMap(originalHeightmap.data(), outWidth, outHeight, combinedHeightScale);
 
     // =========================================================================
     // Convert all textures to cubemap format
@@ -916,79 +825,64 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     int cubemapWidth, cubemapHeight;
     getCubemapStripDimensions(faceSize, cubemapWidth, cubemapHeight);
 
-    // Convert heightmap to cubemap
-    unsigned char *heightmapCubemap = convertEquirectangularToCubemapUChar(heightmapEquirect, outWidth, outHeight, 1, faceSize);
-    delete[] heightmapEquirect;
+    std::cout << "  Face size: " << faceSize << ", Cubemap grid: " << cubemapWidth << "x" << cubemapHeight << '\n';
+
+    // Convert HDR heightmap to cubemap (single channel float)
+    float *heightmapHDRCubemap = convertEquirectangularToCubemapFloat(heightmapHDR, outWidth, outHeight, 1, faceSize);
+    delete[] heightmapHDR;
 
     // Convert normal map to cubemap
     unsigned char *normalMapCubemap = convertEquirectangularToCubemapUChar(normalMapEquirect, outWidth, outHeight, 3, faceSize);
     delete[] normalMapEquirect;
 
-    // Convert bathymetry heightmap to cubemap
-    unsigned char *bathymetryCubemap = convertEquirectangularToCubemapUChar(bathymetryHeight.data(), outWidth, outHeight, 1, faceSize);
-
-    // Convert bathymetry normal map to cubemap
-    unsigned char *bathymetryNormalCubemap = convertEquirectangularToCubemapUChar(bathymetryNormal.data(), outWidth, outHeight, 3, faceSize);
-
-    // Convert combined normal map to cubemap
-    unsigned char *combinedNormalCubemap = nullptr;
-    if (combinedNormalMap)
-    {
-        combinedNormalCubemap = convertEquirectangularToCubemapUChar(combinedNormalMap, outWidth, outHeight, 3, faceSize);
-        delete[] combinedNormalMap;
-    }
+    // Convert 8-bit heightmap to cubemap (legacy, for backward compatibility)
+    unsigned char *heightmap8bitCubemap = convertEquirectangularToCubemapUChar(heightmap8bit, outWidth, outHeight, 1, faceSize);
+    delete[] heightmap8bit;
 
     // =========================================================================
     // Save all cubemap textures
     // =========================================================================
     std::cout << "Saving cubemap textures..." << '\n';
 
-    // Save bathymetry heightmap cubemap
-    if (bathymetryCubemap)
+    // Save combined HDR heightmap (single channel, but stbi_write_hdr expects 3+ channels)
+    // We'll store as RGB where all channels have the same value
+    if (heightmapHDRCubemap)
     {
-        std::cout << "Saving bathymetry depth cubemap: " << bathymetryHeightPath << '\n';
-        if (!stbi_write_png(bathymetryHeightPath.c_str(), cubemapWidth, cubemapHeight, 1, bathymetryCubemap, cubemapWidth))
+        std::cout << "Saving combined HDR heightmap: " << combinedHeightmapPath << '\n';
+        
+        // Convert single channel to RGB for HDR output
+        size_t pixelCount = static_cast<size_t>(cubemapWidth) * cubemapHeight;
+        float *heightmapRGB = new float[pixelCount * 3];
+        for (size_t i = 0; i < pixelCount; i++)
         {
-            std::cerr << "  WARNING: Failed to save bathymetry heightmap" << '\n';
+            heightmapRGB[i * 3 + 0] = heightmapHDRCubemap[i];
+            heightmapRGB[i * 3 + 1] = heightmapHDRCubemap[i];
+            heightmapRGB[i * 3 + 2] = heightmapHDRCubemap[i];
         }
-        delete[] bathymetryCubemap;
-    }
-
-    // Save bathymetry normal map cubemap
-    if (bathymetryNormalCubemap)
-    {
-        std::cout << "Saving bathymetry normal cubemap: " << bathymetryNormalPath << '\n';
-        if (!stbi_write_png(bathymetryNormalPath.c_str(), cubemapWidth, cubemapHeight, 3, bathymetryNormalCubemap, cubemapWidth * 3))
+        
+        if (!stbi_write_hdr(combinedHeightmapPath.c_str(), cubemapWidth, cubemapHeight, 3, heightmapRGB))
         {
-            std::cerr << "  WARNING: Failed to save bathymetry normal map" << '\n';
-        }
-        delete[] bathymetryNormalCubemap;
-    }
-
-    // Save combined normal map cubemap
-    if (combinedNormalCubemap)
-    {
-        std::cout << "Saving combined normal cubemap: " << combinedNormalPath << '\n';
-        if (!stbi_write_png(combinedNormalPath.c_str(), cubemapWidth, cubemapHeight, 3, combinedNormalCubemap, cubemapWidth * 3))
-        {
-            std::cerr << "  WARNING: Failed to save combined normal map" << '\n';
-        }
-        delete[] combinedNormalCubemap;
-    }
-
-    // Save heightmap cubemap
-    if (heightmapCubemap)
-    {
-        std::cout << "Saving heightmap cubemap: " << heightmapPath << '\n';
-        if (!stbi_write_png(heightmapPath.c_str(), cubemapWidth, cubemapHeight, 1, heightmapCubemap, cubemapWidth))
-        {
-            std::cerr << "Failed to save heightmap" << '\n';
-            delete[] heightmapCubemap;
+            std::cerr << "Failed to save HDR heightmap" << '\n';
+            delete[] heightmapRGB;
+            delete[] heightmapHDRCubemap;
             if (normalMapCubemap) delete[] normalMapCubemap;
+            if (heightmap8bitCubemap) delete[] heightmap8bitCubemap;
             std::cout << "===================================" << '\n';
             return false;
         }
-        delete[] heightmapCubemap;
+        delete[] heightmapRGB;
+        delete[] heightmapHDRCubemap;
+    }
+
+    // Save legacy 8-bit heightmap (for backward compatibility)
+    if (heightmap8bitCubemap)
+    {
+        std::cout << "Saving legacy 8-bit heightmap: " << legacyHeightmapPath << '\n';
+        if (!stbi_write_png(legacyHeightmapPath.c_str(), cubemapWidth, cubemapHeight, 1, heightmap8bitCubemap, cubemapWidth))
+        {
+            std::cerr << "  WARNING: Failed to save legacy heightmap" << '\n';
+        }
+        delete[] heightmap8bitCubemap;
     }
 
     // Save normal map cubemap
@@ -1009,6 +903,9 @@ bool EarthMaterial::preprocessElevation(const std::string &defaultsPath,
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
     std::cout << "Elevation processing complete in " << (duration.count() / 1000.0) << "s" << '\n';
+    std::cout << "  Combined HDR heightmap: earth_elevation.hdr" << '\n';
+    std::cout << "  Normalized range: Mariana Trench (0.0) to Mt. Everest (1.0)" << '\n';
+    std::cout << "  Sea level at: ~0.554" << '\n';
     std::cout << "===================================" << '\n';
 
     return true;
